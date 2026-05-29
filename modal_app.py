@@ -1,6 +1,6 @@
 """
-modal_app.py — Holographic Laplace Attention (HLA-v4)
-NeurIPS-grade experiment orchestration for Modal cloud.
+modal_app.py — Holographic Laplace attention 
+NeurIPS grade experiment orchestration for Modal cloud.
 
 Usage:
   modal run modal_app.py --mode upload --use-init true
@@ -20,14 +20,12 @@ from pathlib import Path
 
 import modal
 
-# =========================================================
-# GLOBALS
-# =========================================================
+
 
 APP_NAME        = "hla-v4"
 PYTHON_VERSION  = "3.11"
 GPU_TYPE        = "A100-80GB"
-GPU_COST_PER_HR = 3.70  # approximate Modal A100 cost
+GPU_COST_PER_HR = 3.70  
 
 DATA_VOLUME_NAME = "hla-data"
 CKPT_VOLUME_NAME = "hla-checkpoints"
@@ -57,9 +55,7 @@ data_vol = modal.Volume.from_name(DATA_VOLUME_NAME, create_if_missing=True)
 ckpt_vol = modal.Volume.from_name(CKPT_VOLUME_NAME, create_if_missing=True)
 
 
-# =========================================================
-# MODEL CONFIG
-# =========================================================
+
 
 MODEL_SHAPE = {
     "block_size": 1024,
@@ -93,12 +89,9 @@ VARIANT_OVERRIDES = {
 }
 
 
-# =========================================================
-# TRAINING PRESETS
-# =========================================================
+
 
 PRESETS = {
-    # ----- Smoke test: ~2.6M tokens, ~2 min, ~$0.15 -----
     "smoke": {
         "batch_size_per_device":      32,
         "eval_batch_size_per_device":  8,
@@ -115,7 +108,6 @@ PRESETS = {
         "estimated_hours": 0.05,
     },
 
-    # ----- Article: ~590M tokens, ~3.5h, ~$13 -----
     "article": {
         "batch_size_per_device":      32,
         "eval_batch_size_per_device": 32,
@@ -132,7 +124,6 @@ PRESETS = {
         "estimated_hours": 3.5,
     },
 
-    # ----- Aggressive: ~590M tokens, bigger LR, riskier -----
     "aggressive": {
         "batch_size_per_device":      32,
         "eval_batch_size_per_device": 32,
@@ -149,7 +140,6 @@ PRESETS = {
         "estimated_hours": 3.5,
     },
 
-    # ----- Long: ~1.05B tokens, ~6h, ~$22 -----
     "long": {
         "batch_size_per_device":      32,
         "eval_batch_size_per_device": 32,
@@ -166,7 +156,6 @@ PRESETS = {
         "estimated_hours": 6.0,
     },
 
-    # ----- CPT (Continued Pretraining): softer LR -----
     "cpt": {
         "batch_size_per_device":      32,
         "eval_batch_size_per_device": 32,
@@ -195,10 +184,6 @@ COMMON_TRAIN = {
 }
 
 
-# =========================================================
-# HELPERS
-# =========================================================
-
 def validate_model_shape(model_cfg: dict):
     assert model_cfg["n_embd"] % model_cfg["n_head"] == 0, \
         f"n_embd ({model_cfg['n_embd']}) must be divisible by n_head ({model_cfg['n_head']})"
@@ -220,7 +205,6 @@ def planned_tokens(cfg: dict) -> int:
 
 
 def config_hash(cfg: dict) -> str:
-    # Exclude non-deterministic / meta fields from hash
     hashable = {k: v for k, v in cfg.items()
                 if k not in ("run_name", "save_dir", "config_hash",
                              "timeout_sec", "estimated_hours")}
@@ -248,10 +232,10 @@ def make_config(
 ) -> dict:
     if variant not in VARIANT_OVERRIDES:
         valid = ", ".join(VARIANT_OVERRIDES.keys())
-        raise ValueError(f"Unknown variant: '{variant}'. Valid: {valid}")
+        raise ValueError(f"Unknown variant: '{variant}'. valid: {valid}")
     if preset not in PRESETS:
         valid = ", ".join(PRESETS.keys())
-        raise ValueError(f"Unknown preset: '{preset}'. Valid: {valid}")
+        raise ValueError(f"Unknown preset: '{preset}'. valid: {valid}")
 
     model = {**COMMON_MODEL, **VARIANT_OVERRIDES[variant]}
     validate_model_shape(model)
@@ -266,7 +250,6 @@ def make_config(
         "model":             model,
     }
 
-    # Resume takes priority over init
     if resume_from:
         cfg["resume_ckpt"] = resume_from
         cfg.pop("init_ckpt", None)
@@ -281,7 +264,6 @@ def make_config(
     cfg["config_hash"] = config_hash(cfg)
 
     return cfg
-
 
 def print_config_summary(cfg: dict):
     tpu   = tokens_per_update(cfg)
@@ -331,7 +313,7 @@ def validate_local_files_for_upload(require_init: bool):
     if missing:
         raise FileNotFoundError(
             "Missing local files for upload:\n  - " + "\n  - ".join(missing)
-            + "\n\nMake sure you have these files in the 'data/' directory."
+            + "\n\nMake sure you have these files in the 'data/'"
         )
 
     print("Local files ready for upload:")
@@ -339,10 +321,6 @@ def validate_local_files_for_upload(require_init: bool):
         size_mb = p.stat().st_size / 1024 ** 2
         print(f"  ✅ {p}  ({size_mb:.1f} MB)")
 
-
-# =========================================================
-# REMOTE FUNCTIONS
-# =========================================================
 
 @app.function(
     image=image,
@@ -419,9 +397,6 @@ def list_run_files(run_name: str) -> dict:
     return {"run_name": run_name, "path": run_dir, "files": files}
 
 
-# =========================================================
-# LOCAL ENTRYPOINT
-# =========================================================
 
 @app.local_entrypoint()
 def main(
@@ -435,7 +410,7 @@ def main(
 ):
     """
     Modes:
-      upload  — Upload data/init to Modal volume
+      upload  — Upload data or init to Modal volume
       check   — Inspect remote volumes
       train   — Start training from scratch or init
       resume  — Continue training from a full checkpoint
@@ -454,11 +429,10 @@ def main(
             elif use_init:
                 raise FileNotFoundError("use_init=True but data/init_state.pt not found.")
 
-        print(f"\n✅ Uploaded to Modal volume '{DATA_VOLUME_NAME}'")
         print("Next: modal run modal_app.py --mode check")
         return
 
-    # ---- CHECK ----
+
     if mode == "check":
         info = inspect_remote_files.remote()
 
@@ -475,7 +449,6 @@ def main(
             print(f"  {d['path']}  ({d['n_files']} files, {d['total_mb']} MB)")
         return
 
-    # ---- LIST ----
     if mode == "list":
         if not run_name:
             raise ValueError("--run-name is required for list mode")
@@ -489,7 +462,7 @@ def main(
             print(f"   {fname}  ({meta['size_mb']} MB)")
         return
 
-    # ---- TRAIN / RESUME ----
+
     if mode not in ("train", "resume"):
         valid = "upload, check, train, resume, list"
         raise ValueError(f"Unknown mode: '{mode}'. Valid: {valid}")
@@ -517,18 +490,18 @@ def main(
     print(f"\n💰 Estimated cost for this run: ${cost:.2f}")
 
     if preset == "smoke":
-        print("🔬 [SMOKE] Quick sanity check. Cheap and fast.")
+        print("Sanity check")
     elif preset == "article":
-        print("📄 [ARTICLE] Paper-quality matched comparison.")
+        print("Paper quality matched comparison")
     elif preset == "aggressive":
-        print("⚡ [AGGRESSIVE] Higher LR, same tokens. Risk/reward.")
+        print("Higher Lr, same tokens")
     elif preset == "long":
-        print("🏋️ [LONG] Extended run. Make sure article preset passed first.")
+        print("Extended run. You need to make sure that article preset passed first")
     elif preset == "cpt":
-        print("🔄 [CPT] Continued pretraining with softer LR.")
+        print("Continued pretraining with softer lr")
 
     if mode == "resume":
-        print(f"🔁 [RESUME] Continuing from: {resume_path}")
+        print(f"Continuing from: {resume_path}")
 
-    print("\n🚀 Launching training on Modal...")
+    print("\nLaunching training on Modal")
     train_remote.remote(cfg)
