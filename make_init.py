@@ -28,9 +28,6 @@ import torch
 
 from train1 import GPT, GPTConfig
 
-# =========================================================
-# CONFIG — MUST match modal_app.py COMMON_MODEL shape
-# =========================================================
 
 INIT_CFG = GPTConfig(
     block_size=1024,
@@ -39,7 +36,6 @@ INIT_CFG = GPTConfig(
     n_head=12,
     n_embd=768,
 
-    # Neutral settings: feature disabled, but all params exist
     phase_mult=0.0,
     use_laplace=True,
     laplace_alpha=0.0,
@@ -48,7 +44,7 @@ INIT_CFG = GPTConfig(
     beta_k=0.55,
     beta_v=0.18,
 
-    gradient_checkpointing=False,  # not needed for init creation
+    gradient_checkpointing=False, 
 )
 
 SEED = 42
@@ -56,9 +52,6 @@ OUT_PATH = "init_state.pt"
 MANIFEST_PATH = "init_state_manifest.json"
 
 
-# =========================================================
-# HELPERS
-# =========================================================
 
 def sha256_of_file(path: str, chunk_size: int = 1024 * 1024) -> str:
     h = hashlib.sha256()
@@ -91,9 +84,7 @@ def model_shape_summary(cfg: GPTConfig) -> str:
     )
 
 
-# =========================================================
-# MAIN
-# =========================================================
+
 
 def main():
     print("=" * 72)
@@ -114,21 +105,15 @@ def main():
     print(f"\nSeed: {SEED}")
     print(f"Shape: {model_shape_summary(INIT_CFG)}")
 
-    # -----------------------------------------------------
-    # 2) Reproducibility
-    # -----------------------------------------------------
+
     torch.manual_seed(SEED)
 
-    # -----------------------------------------------------
-    # 3) Create model
-    # -----------------------------------------------------
+
     print("\nCreating model on CPU...")
     model = GPT(INIT_CFG)
     model.eval()
 
-    # -----------------------------------------------------
-    # 4) Parameter counts
-    # -----------------------------------------------------
+
     total_params = sum(p.numel() for p in model.parameters())
     unique_params = sum(p.numel() for p in {id(p): p for p in model.parameters()}.values())
 
@@ -137,26 +122,20 @@ def main():
     print(f"  unique params:                                              {unique_params:,}")
     print(f"  fp32 size estimate:                                         {unique_params * 4 / 1024**2:.1f} MB")
 
-    # -----------------------------------------------------
-    # 5) Check weight tying properly (on model, not state_dict)
-    # -----------------------------------------------------
+
     tied_ok = model.transformer.wte.weight.data_ptr() == model.lm_head.weight.data_ptr()
     print(f"\nWeight tying:")
     print(f"  {pretty_bool(tied_ok)} transformer.wte.weight is lm_head.weight")
     if not tied_ok:
-        raise RuntimeError("Weight tying check failed: wte and lm_head are not tied.")
+        raise RuntimeError("Weight tying check failed")
 
-    # -----------------------------------------------------
-    # 6) Get state_dict
-    # -----------------------------------------------------
+
     sd = model.state_dict()
     print(f"\nstate_dict:")
     print(f"  keys: {len(sd)}")
 
-    # -----------------------------------------------------
-    # 7) Check required architecture keys across ALL layers
-    # -----------------------------------------------------
-    print("\nChecking required architecture keys across all layers...")
+
+    print("\nChecking required architecture keys across all layers")
     required_suffixes = [
         "attn.W_phase_q",
         "attn.W_phase_k",
@@ -184,10 +163,8 @@ def main():
     else:
         print(f"  {pretty_bool(True)} all required keys exist in all {INIT_CFG.n_layer} layers")
 
-    # -----------------------------------------------------
-    # 8) Check zero-init of phase/gate/range params across ALL layers
-    # -----------------------------------------------------
-    print("\nChecking zero initialization across all layers...")
+
+    print("\nChecking zero initialization across all layers")
     zero_specs = [
         ("W_phase_q", "attn.W_phase_q"),
         ("W_phase_k", "attn.W_phase_k"),
@@ -209,39 +186,33 @@ def main():
 
     if zero_init_failures:
         raise RuntimeError(
-            "Zero initialization check failed for some phase/gate/range parameters."
+            "Zero initialization check failed for some parameters."
         )
 
-    # -----------------------------------------------------
-    # 9) Check all tensors are finite
-    # -----------------------------------------------------
-    print("\nChecking all parameters are finite...")
+
+    print("\nChecking all parameters are finite")
     non_finite_keys = []
     for k, v in sd.items():
         if torch.is_floating_point(v) and not tensor_has_finite(v):
             non_finite_keys.append(k)
 
     if non_finite_keys:
-        print(f"  {pretty_bool(False)} found non-finite tensors:")
+        print(f"  {pretty_bool(False)} found non finite tensors:")
         for k in non_finite_keys[:20]:
             print(f"    {k}")
         raise RuntimeError("Found NaN/Inf in initial parameters.")
     else:
         print(f"  {pretty_bool(True)} all floating tensors are finite")
 
-    # -----------------------------------------------------
-    # 10) Save state_dict
-    # -----------------------------------------------------
+
     print(f"\nSaving init state to: {OUT_PATH}")
     torch.save(sd, OUT_PATH)
 
     size_mb = os.path.getsize(OUT_PATH) / 1024**2
     print(f"Saved file size: {size_mb:.1f} MB")
 
-    # -----------------------------------------------------
-    # 11) Round-trip check
-    # -----------------------------------------------------
-    print("\nRound-trip load check...")
+
+    print("\nRound-trip load check")
     loaded = torch.load(OUT_PATH, map_location="cpu", weights_only=True)
 
     if set(sd.keys()) != set(loaded.keys()):
@@ -263,15 +234,11 @@ def main():
 
     print(f"  {pretty_bool(True)} round-trip keys/shapes/dtypes all match")
 
-    # -----------------------------------------------------
-    # 12) SHA256 for reproducibility
-    # -----------------------------------------------------
+
     sha256 = sha256_of_file(OUT_PATH)
     print(f"\nSHA256: {sha256}")
 
-    # -----------------------------------------------------
-    # 13) Save manifest
-    # -----------------------------------------------------
+
     manifest = {
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "seed": SEED,
@@ -301,12 +268,8 @@ def main():
 
     print(f"Manifest saved: {MANIFEST_PATH}")
 
-    # -----------------------------------------------------
-    # 14) Final instructions
-    # -----------------------------------------------------
-    print("\n" + "=" * 72)
+
     print("init_state.pt is ready for upload to Modal Volume")
-    print("=" * 72)
     print("\nNext steps:")
     print("  1) Put init_state.pt into ./data/init_state.pt")
     print("  2) modal run modal_app.py --mode upload --use-init true")
