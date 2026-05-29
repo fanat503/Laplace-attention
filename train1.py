@@ -104,7 +104,7 @@ class SwiGLU(nn.Module):
     def __init__(self, config):
         super().__init__()
         hidden_dim = int(8 * config.n_embd / 3)
-        hidden_dim = ((hidden_dim + 63) // 64) * 64  # tensor-core friendly
+        hidden_dim = ((hidden_dim + 63) // 64) * 64  
         self.w1 = nn.Linear(config.n_embd, hidden_dim, bias=False)
         self.w2 = nn.Linear(config.n_embd, hidden_dim, bias=False)
         self.w3 = nn.Linear(hidden_dim, config.n_embd, bias=False)
@@ -207,9 +207,6 @@ class CausalSelfAttention(nn.Module):
 
         k = k_rot
 
-        # =====================================================
-        # 2) Residual Laplace v4: K + V gating
-        # =====================================================
         if self.use_laplace and self.laplace_alpha != 0.0:
             # ---- K gating ----
             gate_k = torch.tanh(self.W_gate_k(x)).float()       # (B, T, H)
@@ -293,7 +290,6 @@ class GPTConfig:
     laplace_range_k: float = 0.35
     laplace_range_v: float = 0.25
 
-    # Residual Laplace v4
     beta_k: float = 0.50
     beta_v: float = 0.30
 
@@ -316,7 +312,6 @@ class GPT(nn.Module):
 
         self.apply(self._init_weights)
 
-        # tie weights AFTER init, so shared weight is not initialized twice
         self.lm_head.weight = self.transformer.wte.weight
 
         self.gradient_checkpointing = config.gradient_checkpointing
@@ -394,7 +389,7 @@ class FixedDataset(Dataset):
 
         self.tokens = torch.load(path, mmap=True, weights_only=True)
         self.seq_len = seq_len
-        self.block = seq_len + 1  # input + target
+        self.block = seq_len + 1 
 
         # --- Validate tensor ---
         if not isinstance(self.tokens, torch.Tensor):
@@ -421,12 +416,10 @@ class FixedDataset(Dataset):
                 f"need at least {self.block:,} for seq_len={seq_len}"
             )
 
-        # --- Stats ---
         self.n_sequences = len(self.tokens) // self.block
         self.n_tokens_used = self.n_sequences * self.block
         self.n_tokens_dropped = len(self.tokens) - self.n_tokens_used
 
-        # Optional: value range check (catches corrupted files)
         token_min = self.tokens[:1000].min().item()
         token_max = self.tokens[:1000].max().item()
 
@@ -436,7 +429,6 @@ class FixedDataset(Dataset):
                 f"Likely corrupted or wrong format."
             )
 
-        # --- Log ---
         self._path = path
         self._file_size_mb = file_size_mb
         self._token_min = token_min
@@ -490,17 +482,13 @@ def get_dataloader(
     return DataLoader(
         ds,
         batch_size=batch_size,
-        shuffle=False,            # critical for matched data order
+        shuffle=False,            
         pin_memory=True,
         drop_last=drop_last,
-        num_workers=0,            # deterministic; change requires worker_init_fn
+        num_workers=0,          
         worker_init_fn=_worker_init_fn,
         generator=torch.Generator().manual_seed(seed),
     )
-
-# =========================================================
-# PROBES / EVAL
-# =========================================================
 
 @torch.no_grad()
 def evaluate_induction(model, device, seed=42, batch_size=32):
@@ -638,7 +626,7 @@ def validation_loss(model, device, val_loader, max_batches=25):
                 loss = loss.mean()
 
             if not torch.isfinite(loss):
-                continue  # пропускаем битый батч вместо того чтобы портить среднее
+                continue 
 
             total_loss += loss.item()
             count += 1
@@ -647,9 +635,6 @@ def validation_loss(model, device, val_loader, max_batches=25):
     finally:
         model.train(was_training)
 
-# =========================================================
-# TRAIN
-# =========================================================
 
 def train_worker(config):
     gc.collect()
@@ -693,9 +678,6 @@ def train_worker(config):
         fused=config.get("fused_adamw", False),
     )
 
-    # =====================================================
-    # CHECKPOINT LOADING: resume > init > random
-    # =====================================================
     completed_step = 0
     best_val = float("inf")
 
@@ -770,9 +752,6 @@ def train_worker(config):
         if accelerator.is_main_process:
             print("[Init] No checkpoint specified. Using fresh random initialization.")
 
-    # =====================================================
-    # DATA LOADERS
-    # =====================================================
     train_loader_raw = get_dataloader(
         path=config["train_path"],
         seq_len=model_config.block_size,
@@ -793,9 +772,6 @@ def train_worker(config):
             print_summary=False,
         )
 
-    # =====================================================
-    # DATASET / BATCH STATS
-    # =====================================================
     n_train_sequences = len(train_loader_raw.dataset)
     n_val_sequences = len(val_loader.dataset) if val_loader is not None else 0
 
@@ -818,9 +794,7 @@ def train_worker(config):
         print(f"Train tokens effective:    {train_tokens_effective:,}")
         print(f"Val tokens effective:      {val_tokens_effective:,}")
 
-    # =====================================================
-    # TRAINING BUDGET STATS
-    # =====================================================
+
     tokens_per_update = (
         config["batch_size_per_device"]
         * accelerator.num_processes
@@ -859,19 +833,12 @@ def train_worker(config):
         )
         print("[WARNING] Training will naturally stop when dataset ends.")
 
-    # =====================================================
-    # PREPARE FOR DISTRIBUTED / MIXED PRECISION
-    # =====================================================
+
     model, optimizer, train_loader = accelerator.prepare(
         model, optimizer, train_loader_raw
     )
 
-    # =====================================================
-    # SKIP ALREADY CONSUMED BATCHES IF RESUMING
-    # NOTE:
-    # after accelerator.prepare(), train_loader is local to the process,
-    # so we skip LOCAL micro-batches = completed_step * grad_accum
-    # =====================================================
+
     local_micro_batches_to_skip = completed_step * config["grad_accum"]
 
     if local_micro_batches_to_skip > 0:
@@ -909,7 +876,6 @@ def train_worker(config):
         writer = csv.writer(csv_file)
 
         if not append_csv:
-            # Метаданные эксперимента — первые строки файла
             writer.writerow(["# experiment", run_name])
             writer.writerow(["# variant", config.get("variant", "unknown")])
             writer.writerow(["# seed", config["seed"]])
@@ -918,9 +884,8 @@ def train_worker(config):
             writer.writerow(["# laplace_alpha", config["model"].get("laplace_alpha", 0.0)])
             writer.writerow(["# baseline_type", config["model"].get("baseline_type", "unknown")])
             writer.writerow(["# tokens_planned", tokens_per_update * config["max_steps"]])
-            writer.writerow([])  # пустая строка-разделитель
+            writer.writerow([])  
     
-            # Основной header
             writer.writerow([
                 "step",
                 "tokens_seen",
@@ -941,13 +906,13 @@ def train_worker(config):
             writer.writerow(["# resumed_run", time.strftime("%Y-%m-%d %H:%M:%S")])
             writer.writerow(["# resumed_from_step", completed_step])
             csv_file.flush()
-            print(f"[Resume] Appending to existing CSV: {csv_path}")
+            print(f" Appending to existing CSV: {csv_path}")
 
         print(f"Using {accelerator.num_processes} GPU(s)")
         print(f"Mixed precision: {accelerator.mixed_precision}")
         print(f"Parameters: {n_params:,}")
-        print(f"Tokens/update: {tokens_per_update:,}")
-        print(f"Planned total tokens: {tokens_per_update * config['max_steps']:,}")
+        print(f"Tokens per  update: {tokens_per_update:,}")
+        print(f"Planned tokens: {tokens_per_update * config['max_steps']:,}")
         print(f"Save dir: {save_dir}")
 
     micro_in_update = 0
@@ -970,7 +935,6 @@ def train_worker(config):
             if completed_step >= config["max_steps"]:
                 break
 
-            # LR update for current step
             lr = get_lr(completed_step)
             for pg in optimizer.param_groups:
                 pg["lr"] = lr
@@ -1020,9 +984,6 @@ def train_worker(config):
                 if completed_step % config["log_every"] == 0:
                     accelerator.wait_for_everyone()
 
-                    # ---------------------------------------------
-                    # Aggregate window stats BEFORE resetting them
-                    # ---------------------------------------------
                     steps_in_window = max(log_steps_accum, 1)
                     smooth_loss = log_loss_accum / steps_in_window
                     smooth_grad_norm = log_grad_norm_accum / steps_in_window
@@ -1037,7 +998,6 @@ def train_worker(config):
                     last_log_time = now
                     last_log_step = completed_step
 
-                    # Reset accumulators on ALL processes
                     log_loss_accum = 0.0
                     log_grad_norm_accum = 0.0
                     log_steps_accum = 0
@@ -1068,7 +1028,7 @@ def train_worker(config):
                         )
                         _, phase_norm = phase_statistics(base_model)
 
-                        # Extra safety: sanitize non-finite metrics
+
                         if not math.isfinite(induction):
                             induction = float("nan")
                         if not math.isfinite(entropy):
@@ -1125,23 +1085,20 @@ def train_worker(config):
                             f"  Wall time  : {wall_time_sec:.1f}s"
                         )
 
-                        # ---------------------------------------------
-                        # Save best checkpoint
-                        # ---------------------------------------------
                         if math.isfinite(val_loss_val) and val_loss_val < best_val:
                             if free_disk_gb(save_dir) < config["min_free_gb_best"]:
                                 raise RuntimeError("Not enough free disk space for best checkpoint")
 
                             best_val = val_loss_val
 
-                            # Light weights for eval / paper plots / lm-eval
+                            
                             save_model_weights(
                                 model=base_model,
                                 path=os.path.join(save_dir, f"best_val_{run_name}.pt"),
                                 dtype=torch.bfloat16
                             )
 
-                            # Full checkpoint for resume
+
                             save_checkpoint(
                                 model=base_model,
                                 optimizer=optimizer,
@@ -1152,9 +1109,7 @@ def train_worker(config):
 
                             print(f"  [Saved best] val_loss={best_val:.6f}")
 
-                        # ---------------------------------------------
-                        # Periodic checkpoint
-                        # ---------------------------------------------
+
                         if completed_step % config["save_every"] == 0:
                             if free_disk_gb(save_dir) >= config["min_free_gb_best"]:
                                 save_model_weights(
@@ -1171,9 +1126,9 @@ def train_worker(config):
                                     dtype=torch.bfloat16
                                 )
 
-                                print(f"  [Saved ckpt] step_{completed_step}_{run_name}.pt")
+                                print(f"  step_{completed_step}_{run_name}.pt")
                             else:
-                                print("  [Skip save] not enough free disk space for periodic checkpoint")
+                                print("  not enough free disk space for periodic checkpoint")
 
                     model.train()
                     accelerator.wait_for_everyone()
@@ -1184,14 +1139,12 @@ def train_worker(config):
                 base_model = accelerator.unwrap_model(model)
 
                 if free_disk_gb(save_dir) >= config["min_free_gb_final"]:
-                    # 1) Финальные fp32 веса модели
                     save_model_weights(
                         model=base_model,
                         path=os.path.join(save_dir, f"final_{run_name}_fp32.pt"),
                         dtype=torch.float32
                     )
 
-                    # 2) Финальный полный resume-checkpoint
                     save_checkpoint(
                         model=base_model,
                         optimizer=optimizer,
@@ -1202,7 +1155,7 @@ def train_worker(config):
 
                     print(f"Saved final fp32 checkpoint: final_{run_name}_fp32.pt")
                 else:
-                    print("WARNING: not enough disk space to save final fp32 checkpoint")
+                    print("Not enough disk space to save final fp32 checkpoint")
 
             except Exception as e:
                 print(f"WARNING: failed to save final checkpoint: {e}")
@@ -1211,4 +1164,4 @@ def train_worker(config):
                 csv_file.close()
 
 if __name__ == "__main__":
-    raise RuntimeError("Run this through modal_app.py, not directly.")
+    raise RuntimeError("Run this through modal_app.py")
