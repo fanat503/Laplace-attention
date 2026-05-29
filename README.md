@@ -6,8 +6,8 @@ Hla-v4 is an attention modification designed to separate retrieval (Query-Key ma
 How it works
 The main idea is to stop positional and semantic signals from interfering with each other in the attention matrix.
 
-Phase rotation (Q & K): Instead of standard embeddings, I use content-conditioned rotations. The model generates angles based on the input tokens, bounded by tanh, and applies them to Q and K. This lets the heads "rotate" into alignment in a complex latent space.
-Laplace Gating (K & V): I added a gating path inspired by Laplace distribution priors. It uses a head-specific range modifier to control how much "reach" each head has. It’s implemented as a residual mix:
+Phase rotation (Q and K): Instead of standard embeddings, I use content conditioned rotations. The model generates angles based on the input tokens, bounded by tanh, and applies them to Q and K. This lets the heads rotate into alignment in a complex latent space.
+Laplace Gating (K and V): I added a gating path inspired by Laplace distribution priors. It uses a head-specific range modifier to control how much "reach" each head has. It’s implemented as a residual mix:
 Mix = (1 - beta) + beta * exp(gate * range)
 This means at init (when weights are 0), the model is just a standard Transformer.
 I built this repo specifically for sterile experiments on Modal.
