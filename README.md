@@ -14,7 +14,7 @@ I built this repo specifically for sterile experiments on Modal.
 
 Sterile init: I use a separate script (make_init.py) to create a shared starting checkpoint. Both Base and v4 start from the exact same weights, so the 0.09 gap isn't just luck :).
 Causal safe: Strict causal masking is applied across all new layers. No future leakage.
-Modal Ops: The modal_app.py handles everything: volume uploads, config hashing, and auto-resuming from checkpoints.
+Modal: The modal_app.py handles everything: volume uploads, config hashing, and auto-resuming from checkpoints.
 Current Status
 I'm a 13yo independent researcher. v3 worked well, but I need to see if these scaling laws hold up at 1B+ tokens. I'm currently looking for compute grants to run the full benchmark.
 
