@@ -2,7 +2,9 @@
 Model definition for HLA-v4-safe-scale experiments.
 
 This file intentionally preserves the logic of the provided HLA-v4 model:
-  - learned absolute positional embeddings (`wpe`);
+  - positional encoding: RoPE (`use_rope=True, use_wpe=False`, recommended) or
+    legacy learned absolute embeddings `wpe` (`use_wpe=True`); exactly one
+    mechanism should be active — enforced in GPTConfig.__post_init__;
   - RMSNorm pre-norm blocks;
   - SwiGLU MLP with hidden_dim = round_up(8*n_embd/3, 64);
   - content-conditioned pairwise phase rotation of Q/K;
@@ -34,15 +36,6 @@ class RMSNorm(nn.Module):
         super().__init__()
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(d_model))
-
-    def _apply_rope(self, q: torch.Tensor, k: torch.Tensor, T: int) -> tuple[torch.Tensor, torch.Tensor]:
-        if not self.use_rope:
-            return q, k
-        pos = torch.arange(T, device=q.device, dtype=self.rope_inv_freq.dtype)
-        angles = torch.einsum("t,d->td", pos, self.rope_inv_freq)
-        cos = torch.cos(angles)[None, None, :, :].to(q.dtype)
-        sin = torch.sin(angles)[None, None, :, :].to(q.dtype)
-        return self._rotate_pairwise(q, cos, sin), self._rotate_pairwise(k, cos, sin)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         input_dtype = x.dtype
@@ -105,17 +98,36 @@ class CausalSelfAttention(nn.Module):
         self.rope_theta = float(getattr(config, "rope_theta", 10000.0))
         self.attention_backend = getattr(config, "attention_backend", "manual")
         self.layer_dependent_gate = bool(getattr(config, "layer_dependent_gate", False))
+        # Static heuristic multiplier: deeper layers get wider gate envelopes.
         self.layer_gate_multiplier = (
             1.0 + float(self.layer_idx) / float(max(1, self.n_layer))
             if self.layer_dependent_gate
             else 1.0
         )
+        # Learnable per-layer temperature (ablation of the fixed heuristic).
+        # Effective multiplier: 1 + (l/L) * softplus(theta) / softplus(0).
+        # At theta = 0 this equals the static heuristic EXACTLY, so enabling the
+        # flag does not change the identity-init property or the init behavior;
+        # the model then learns its own depth profile. One scalar per layer.
+        self.learnable_layer_temp = bool(getattr(config, "learnable_layer_temp", False))
+        # Always created for exact base/HLA parameter matching (inactive unless
+        # both layer_dependent_gate and learnable_layer_temp are set).
+        self.W_layer_temp = nn.Parameter(torch.zeros(1))
         self.k_log_clip = float(getattr(config, "k_log_clip", 1.5))
         self.v_log_clip = float(getattr(config, "v_log_clip", 1.0))
         self.use_distance_laplace = bool(getattr(config, "use_distance_laplace", False))
         self.distance_laplace_alpha = float(getattr(config, "distance_laplace_alpha", 0.0))
         self.distance_laplace_range = float(getattr(config, "distance_laplace_range", 1.0))
         self.distance_laplace_clip = float(getattr(config, "distance_laplace_clip", 1.0))
+        # Content-based salience bias: additive log-space bias per KEY position,
+        # b_j = alpha * range * tanh(W_gate_sal(x_j)). Unlike the multiplicative
+        # K-mix (which has a floor of 1-beta_k), an additive bias can suppress a
+        # token's attention weight arbitrarily strongly (e.g. -2 nats = x0.135)
+        # or boost it, independent of distance. Identity at init: W_gate_sal = 0.
+        self.use_salience_bias = bool(getattr(config, "use_salience_bias", False))
+        self.salience_alpha = float(getattr(config, "salience_alpha", 0.0))
+        self.salience_range = float(getattr(config, "salience_range", 1.0))
+        self.salience_clip = float(getattr(config, "salience_clip", 2.0))
 
         self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=False)
         self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=False)
@@ -123,6 +135,20 @@ class CausalSelfAttention(nn.Module):
 
         self.W_phase_q = nn.Parameter(torch.zeros(self.n_head, config.n_embd, self.head_dim // 2))
         self.W_phase_k = nn.Parameter(torch.zeros(self.n_head, config.n_embd, self.head_dim // 2))
+        # Per-head phase budget (interpretable, H params per layer):
+        # phase_mult_eff[h] = phase_mult * (1 + tanh(W_phase_scale[h])) in
+        # [0, 2*phase_mult]. At init (zeros) every head gets exactly phase_mult.
+        # Heads can learn to opt out of rotation (-> 0) or double their budget;
+        # the learned values are directly readable as "how much phase each head
+        # wants" and correlate with per-head interference metrics.
+        self.per_head_phase = bool(getattr(config, "per_head_phase", False))
+        self.W_phase_scale = nn.Parameter(torch.zeros(self.n_head))
+        # Depth-adaptive phase: multiply the phase budget by the SAME layer
+        # multiplier used for gates (incl. the learnable temperature when on).
+        # Rationale: deeper layers carry more semantic content and may benefit
+        # from larger retrieval rotations, mirroring the gate design. Max angle
+        # with all knobs on: pi*phase_mult*2(head)*2(layer) = 0.6*pi at 0.15.
+        self.layer_dependent_phase = bool(getattr(config, "layer_dependent_phase", False))
 
         self.use_laplace = getattr(config, "use_laplace", False)
         self.laplace_alpha = getattr(config, "laplace_alpha", 1.0)
@@ -136,10 +162,14 @@ class CausalSelfAttention(nn.Module):
 
         self.W_gate_k = nn.Linear(config.n_embd, self.n_head, bias=False)
         self.W_gate_v = nn.Linear(config.n_embd, self.n_head, bias=False)
+        # Always created (regardless of use_salience_bias) so base/HLA stay
+        # parameter-matched; inactive branch is disabled via salience_alpha=0.
+        self.W_gate_sal = nn.Linear(config.n_embd, self.n_head, bias=False)
 
 
         nn.init.constant_(self.W_gate_k.weight, 0.0)
         nn.init.constant_(self.W_gate_v.weight, 0.0)
+        nn.init.constant_(self.W_gate_sal.weight, 0.0)
 
         self.register_buffer(
             "mask",
@@ -154,6 +184,16 @@ class CausalSelfAttention(nn.Module):
         self.last_entropy: Optional[torch.Tensor] = None
         self.last_angle_q_abs_mean: Optional[torch.Tensor] = None
         self.last_angle_k_abs_mean: Optional[torch.Tensor] = None
+        # Saturation fractions: how often |tanh(.)| > 0.99, i.e. the model is
+        # pushing against the expressivity bound set by phase_mult / ranges.
+        # Persistently high values = the bound is too tight (raise it);
+        # near-zero values = the bound is not the limiting factor.
+        self.last_angle_q_sat_frac: Optional[torch.Tensor] = None
+        self.last_angle_k_sat_frac: Optional[torch.Tensor] = None
+        self.last_gate_k_sat_frac: Optional[torch.Tensor] = None
+        self.last_gate_k_abs_mean: Optional[torch.Tensor] = None
+        self.last_gate_v_abs_mean: Optional[torch.Tensor] = None
+        self.last_gate_v_sat_frac: Optional[torch.Tensor] = None
         self.last_gate_k_mean: Optional[torch.Tensor] = None
         self.last_gate_v_mean: Optional[torch.Tensor] = None
         self.last_mix_k_mean: Optional[torch.Tensor] = None
@@ -168,6 +208,8 @@ class CausalSelfAttention(nn.Module):
         self.last_attn_out_norm: Optional[torch.Tensor] = None
         self.last_distance_bias_mean: Optional[torch.Tensor] = None
         self.last_distance_bias_abs_mean: Optional[torch.Tensor] = None
+        self.last_salience_bias_abs_mean: Optional[torch.Tensor] = None
+        self.last_salience_sat_frac: Optional[torch.Tensor] = None
 
     def reset_hla_identity(self) -> None:
         """Reset HLA-specific parameters to the exact identity state."""
@@ -178,6 +220,9 @@ class CausalSelfAttention(nn.Module):
             self.W_range_v.zero_()
             self.W_gate_k.weight.zero_()
             self.W_gate_v.weight.zero_()
+            self.W_gate_sal.weight.zero_()
+            self.W_layer_temp.zero_()
+            self.W_phase_scale.zero_()
 
     @staticmethod
     def _rotate_pairwise(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
@@ -189,6 +234,21 @@ class CausalSelfAttention(nn.Module):
             ],
             dim=-1,
         )
+
+    def _apply_rope(self, q: torch.Tensor, k: torch.Tensor, T: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Standard RoPE applied to Q/K before content-conditioned phase rotation.
+
+        NOTE: this method must live on CausalSelfAttention (it uses self.use_rope
+        and self.rope_inv_freq registered here). In the original file it was
+        accidentally defined inside RMSNorm, which made every forward pass crash.
+        """
+        if not self.use_rope:
+            return q, k
+        pos = torch.arange(T, device=q.device, dtype=self.rope_inv_freq.dtype)
+        angles = torch.einsum("t,d->td", pos, self.rope_inv_freq)
+        cos = torch.cos(angles)[None, None, :, :].to(q.dtype)
+        sin = torch.sin(angles)[None, None, :, :].to(q.dtype)
+        return self._rotate_pairwise(q, cos, sin), self._rotate_pairwise(k, cos, sin)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, T, C = x.size()
@@ -206,14 +266,31 @@ class CausalSelfAttention(nn.Module):
 
         q, k = self._apply_rope(q, k, T)
 
+        # Effective per-layer gate multiplier: static heuristic, optionally
+        # modulated by the learnable temperature (exact heuristic at theta=0).
+        layer_mult = self.layer_gate_multiplier
+        if self.layer_dependent_gate and self.learnable_layer_temp:
+            depth = float(self.layer_idx) / float(max(1, self.n_layer))
+            temp = F.softplus(self.W_layer_temp.float()) / math.log(2.0)  # softplus(0)=log 2
+            layer_mult = 1.0 + depth * temp.squeeze(0)
 
         if self.phase_mult != 0.0:
             x_float = x.float()
             raw_angles_q = torch.einsum("btd,hdk->bhtk", x_float, self.W_phase_q.float())
             raw_angles_k = torch.einsum("btd,hdk->bhtk", x_float, self.W_phase_k.float())
 
-            angles_q = math.pi * self.phase_mult * torch.tanh(raw_angles_q)
-            angles_k = math.pi * self.phase_mult * torch.tanh(raw_angles_k)
+            if self.per_head_phase:
+                # phase_mult_eff[h] in [0, 2*phase_mult]; exactly phase_mult at init.
+                head_budget = 1.0 + torch.tanh(self.W_phase_scale.float())  # (H,)
+                phase_scale = (math.pi * self.phase_mult) * head_budget.view(1, self.n_head, 1, 1)
+            else:
+                phase_scale = math.pi * self.phase_mult
+            if self.layer_dependent_phase:
+                # Same depth profile as the gates (learnable when temp is on).
+                phase_scale = phase_scale * layer_mult
+
+            angles_q = phase_scale * torch.tanh(raw_angles_q)
+            angles_k = phase_scale * torch.tanh(raw_angles_k)
 
             cos_q = torch.cos(angles_q).to(q.dtype)
             sin_q = torch.sin(angles_q).to(q.dtype)
@@ -226,12 +303,18 @@ class CausalSelfAttention(nn.Module):
             with torch.no_grad():
                 self.last_angle_q_abs_mean = angles_q.detach().abs().mean()
                 self.last_angle_k_abs_mean = angles_k.detach().abs().mean()
+                tq = torch.tanh(raw_angles_q.detach()).abs()
+                tk = torch.tanh(raw_angles_k.detach()).abs()
+                self.last_angle_q_sat_frac = (tq > 0.99).float().mean()
+                self.last_angle_k_sat_frac = (tk > 0.99).float().mean()
         else:
             k_rot = k
             with torch.no_grad():
                 zero = torch.zeros((), device=x.device)
                 self.last_angle_q_abs_mean = zero
                 self.last_angle_k_abs_mean = zero
+                self.last_angle_q_sat_frac = zero
+                self.last_angle_k_sat_frac = zero
 
         k = k_rot
         gate_k_for_distance: Optional[torch.Tensor] = None
@@ -241,15 +324,16 @@ class CausalSelfAttention(nn.Module):
             
             gate_k = torch.tanh(self.W_gate_k(x)).float()  # (B, T, H)
             gate_k_for_distance = gate_k
-            range_k = (self.laplace_range_k * self.layer_gate_multiplier) * (
+            range_k = (self.laplace_range_k * layer_mult) * (
                 1.0 + 0.25 * torch.tanh(self.W_range_k.float())
             )  # (H,)
             range_k = range_k.view(1, 1, self.n_head)
 
+            clip_k = self.k_log_clip * layer_mult
             log_scale_k = torch.clamp(
                 self.laplace_alpha * gate_k * range_k,
-                min=-(self.k_log_clip * self.layer_gate_multiplier),
-                max=(self.k_log_clip * self.layer_gate_multiplier),
+                min=-clip_k,
+                max=clip_k,
             )
             scale_k = torch.exp(log_scale_k)
             mix_k = (1.0 - self.beta_k) + self.beta_k * scale_k  # (B, T, H)
@@ -257,15 +341,16 @@ class CausalSelfAttention(nn.Module):
             k = k_rot * mix_k
 
             gate_v = torch.tanh(self.W_gate_v(x)).float()  # (B, T, H)
-            range_v = (self.laplace_range_v * self.layer_gate_multiplier) * (
+            range_v = (self.laplace_range_v * layer_mult) * (
                 1.0 + 0.25 * torch.tanh(self.W_range_v.float())
             )  # (H,)
             range_v = range_v.view(1, 1, self.n_head)
 
+            clip_v = self.v_log_clip * layer_mult
             log_scale_v = torch.clamp(
                 self.laplace_alpha * gate_v * range_v,
-                min=-(self.v_log_clip * self.layer_gate_multiplier),
-                max=(self.v_log_clip * self.layer_gate_multiplier),
+                min=-clip_v,
+                max=clip_v,
             )
             scale_v = torch.exp(log_scale_v)
             mix_v = (1.0 - self.beta_v) + self.beta_v * scale_v  # (B, T, H)
@@ -277,6 +362,14 @@ class CausalSelfAttention(nn.Module):
                 self.last_gate_v_mean = gate_v.detach().mean()
                 self.last_mix_k_mean = mix_k.detach().float().mean()
                 self.last_mix_v_mean = mix_v.detach().float().mean()
+                self.last_gate_k_sat_frac = (gate_k.detach().abs() > 0.99).float().mean()
+                self.last_gate_v_sat_frac = (gate_v.detach().abs() > 0.99).float().mean()
+                # |gate| means: signed means can sit near 0 while the gate is
+                # highly active (symmetric up/down usage). Underuse detector:
+                # abs_mean ~ 0 => mechanism is OFF; sat_frac high => envelope
+                # too TIGHT. Together they bracket "did we size ranges right?".
+                self.last_gate_k_abs_mean = gate_k.detach().abs().mean()
+                self.last_gate_v_abs_mean = gate_v.detach().abs().mean()
                 if self.capture_diagnostics:
                     self.last_gate_k = gate_k.detach()
                     self.last_gate_v = gate_v.detach()
@@ -290,6 +383,10 @@ class CausalSelfAttention(nn.Module):
                 self.last_gate_v_mean = zero
                 self.last_mix_k_mean = one
                 self.last_mix_v_mean = one
+                self.last_gate_k_sat_frac = zero
+                self.last_gate_v_sat_frac = zero
+                self.last_gate_k_abs_mean = zero
+                self.last_gate_v_abs_mean = zero
                 if self.capture_diagnostics:
                     self.last_gate_k = None
                     self.last_gate_v = None
@@ -299,7 +396,16 @@ class CausalSelfAttention(nn.Module):
         # =====================================================
         # 3) Attention
         # =====================================================
-        if self.attention_backend == "sdpa" and not self.capture_diagnostics and not self.capture_attention:
+        # NOTE: the fast SDPA path cannot apply the distance-Laplace log-bias.
+        # Guard against silently changing model semantics when it is active.
+        sdpa_ok = (
+            self.attention_backend == "sdpa"
+            and not self.capture_diagnostics
+            and not self.capture_attention
+            and not (self.use_distance_laplace and self.distance_laplace_alpha != 0.0)
+            and not (self.use_salience_bias and self.salience_alpha != 0.0)
+        )
+        if sdpa_ok:
 
             y = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=True)
             y = y.transpose(1, 2).contiguous().view(B, T, C)
@@ -317,14 +423,15 @@ class CausalSelfAttention(nn.Module):
             dist_bias = (
                 self.distance_laplace_alpha
                 * self.distance_laplace_range
-                * self.layer_gate_multiplier
+                * layer_mult
                 * dist[None, None, :, :]
                 * key_gate
             )
+            clip_d = self.distance_laplace_clip * layer_mult
             dist_bias = torch.clamp(
                 dist_bias,
-                min=-(self.distance_laplace_clip * self.layer_gate_multiplier),
-                max=(self.distance_laplace_clip * self.layer_gate_multiplier),
+                min=-clip_d,
+                max=clip_d,
             )
             att = att + dist_bias.to(att.dtype)
             with torch.no_grad():
@@ -335,6 +442,24 @@ class CausalSelfAttention(nn.Module):
                 zero = torch.zeros((), device=x.device)
                 self.last_distance_bias_mean = zero
                 self.last_distance_bias_abs_mean = zero
+
+        if self.use_salience_bias and self.salience_alpha != 0.0:
+            # Additive per-key salience: strong suppression/boost independent of
+            # distance. Complements the multiplicative K-mix, whose suppression
+            # floor is (1 - beta_k); log-space bias has no such floor.
+            gate_sal = torch.tanh(self.W_gate_sal(x)).float()  # (B, T, H)
+            sal_bias = self.salience_alpha * self.salience_range * gate_sal
+            sal_bias = torch.clamp(sal_bias, min=-self.salience_clip, max=self.salience_clip)
+            sal_bias = sal_bias.transpose(1, 2).unsqueeze(2)  # (B, H, 1, T_key)
+            att = att + sal_bias.to(att.dtype)
+            with torch.no_grad():
+                self.last_salience_bias_abs_mean = sal_bias.detach().float().abs().mean()
+                self.last_salience_sat_frac = (gate_sal.detach().abs() > 0.99).float().mean()
+        elif self.capture_diagnostics:
+            with torch.no_grad():
+                zero = torch.zeros((), device=x.device)
+                self.last_salience_bias_abs_mean = zero
+                self.last_salience_sat_frac = zero
 
         mask = self.mask[:, :, :T, :T]
         att = att.masked_fill(~mask, float("-inf"))
@@ -391,6 +516,10 @@ class GPTConfig:
     phase_mult: float = 0.0
     use_rope: bool = False
     rope_theta: float = 10000.0
+    # Learned absolute positional embeddings. Keep True for legacy non-RoPE
+    # configs; set False in RoPE configs so the model has exactly one
+    # positional mechanism (reviewers will ask why both otherwise).
+    use_wpe: bool = True
 
     use_laplace: bool = True
     laplace_alpha: float = 0.0
@@ -410,6 +539,24 @@ class GPTConfig:
     distance_laplace_alpha: float = 0.0
     distance_laplace_range: float = 1.0
     distance_laplace_clip: float = 1.0
+
+    # Additive per-key content salience bias (see CausalSelfAttention docstring).
+    # Identity-initialized (W_gate_sal = 0). Suppression floor: none (log-space).
+    use_salience_bias: bool = False
+    salience_alpha: float = 0.0
+    salience_range: float = 1.0
+    salience_clip: float = 2.0
+
+    # Learnable per-layer gate temperature (requires layer_dependent_gate).
+    # Identity-compatible: at theta=0 the multiplier equals the static heuristic.
+    learnable_layer_temp: bool = False
+    # Per-head phase budget: phase_mult_eff[h] = phase_mult*(1+tanh(s_h)) in
+    # [0, 2*phase_mult]; exactly phase_mult at init. H params/layer, readable
+    # as "how much rotation each head chose".
+    per_head_phase: bool = False
+    # Depth-adaptive phase: scale the phase budget by the same layer multiplier
+    # as the gates (static heuristic, or learned when learnable_layer_temp=true).
+    layer_dependent_phase: bool = False
 
     gradient_checkpointing: bool = True
     fused_swiglu: bool = True
@@ -433,6 +580,8 @@ class GPTConfig:
             raise ValueError("head_dim must be even for pairwise rotation")
         if self.rope_theta <= 0:
             raise ValueError("rope_theta must be positive")
+        if not self.use_wpe and not self.use_rope:
+            raise ValueError("model needs positional information: use_wpe and use_rope are both False")
         if self.beta_k < 0 or self.beta_v < 0:
             raise ValueError("beta_k and beta_v must be non-negative")
         if self.k_log_clip <= 0 or self.v_log_clip <= 0:
@@ -441,6 +590,14 @@ class GPTConfig:
             raise ValueError("distance_laplace_range must be non-negative")
         if self.distance_laplace_clip <= 0:
             raise ValueError("distance_laplace_clip must be positive")
+        if self.salience_range < 0:
+            raise ValueError("salience_range must be non-negative")
+        if self.salience_clip <= 0:
+            raise ValueError("salience_clip must be positive")
+        if self.learnable_layer_temp and not self.layer_dependent_gate:
+            raise ValueError("learnable_layer_temp requires layer_dependent_gate=true")
+        if self.layer_dependent_phase and not self.layer_dependent_gate:
+            raise ValueError("layer_dependent_phase requires layer_dependent_gate=true (shared depth profile)")
         if self.ffn_hidden_multiple_of <= 0:
             raise ValueError("ffn_hidden_multiple_of must be positive")
         if self.attention_backend not in {"manual", "sdpa"}:
@@ -457,14 +614,16 @@ class GPT(nn.Module):
 
         self.padded_vocab_size = int(config.padded_vocab_size or config.vocab_size)
 
-        self.transformer = nn.ModuleDict(
-            dict(
-                wte=nn.Embedding(self.padded_vocab_size, config.n_embd),
-                wpe=nn.Embedding(config.block_size, config.n_embd),
-                h=nn.ModuleList([Block(config, layer_idx=i) for i in range(config.n_layer)]),
-                ln_f=RMSNorm(config.n_embd),
-            )
+        modules = dict(
+            wte=nn.Embedding(self.padded_vocab_size, config.n_embd),
+            h=nn.ModuleList([Block(config, layer_idx=i) for i in range(config.n_layer)]),
+            ln_f=RMSNorm(config.n_embd),
         )
+        if config.use_wpe:
+            # Legacy learned absolute positions. Disabled in RoPE configs so the
+            # model has exactly one positional mechanism.
+            modules["wpe"] = nn.Embedding(config.block_size, config.n_embd)
+        self.transformer = nn.ModuleDict(modules)
 
         self.lm_head = nn.Linear(config.n_embd, self.padded_vocab_size, bias=False)
 
@@ -504,11 +663,13 @@ class GPT(nn.Module):
         if T > self.config.block_size:
             raise ValueError(f"Sequence length {T} exceeds block_size {self.config.block_size}")
 
-        pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
-
         tok = self.transformer.wte(idx)  # (B, T, C)
-        pos_emb = self.transformer.wpe(pos)[None, :, :]  # (1, T, C)
-        x = tok + pos_emb
+        if self.config.use_wpe:
+            pos = torch.arange(0, T, dtype=torch.long, device=idx.device)
+            pos_emb = self.transformer.wpe(pos)[None, :, :]  # (1, T, C)
+            x = tok + pos_emb
+        else:
+            x = tok
 
         for block in self.transformer.h:
             if self.gradient_checkpointing and self.training:
@@ -554,6 +715,9 @@ class GPT(nn.Module):
                 attn.W_range_v,
                 attn.W_gate_k.weight,
                 attn.W_gate_v.weight,
+                attn.W_gate_sal.weight,
+                attn.W_layer_temp,
+                attn.W_phase_scale,
             ]:
                 err = max(err, float(tensor.detach().float().abs().max().cpu().item()))
         return err

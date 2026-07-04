@@ -25,6 +25,7 @@
   "grad_clip": 1.0,
   "log_every": 20,
   "val_every": 100,
+  "svd_every": 400,
   "val_batches": 16,
   "resume_every": 100,
   "save_every": 500,
@@ -65,7 +66,8 @@
     "distance_laplace_range": 1.0,
     "distance_laplace_clip": 1.0,
     "use_rope": false,
-    "rope_theta": 10000.0
+    "rope_theta": 10000.0,
+    "use_wpe": true
   },
   "dataloader_prefetch_factor": 4,
   "xla_loader_prefetch_size": 8,

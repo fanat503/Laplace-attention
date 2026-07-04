@@ -15,7 +15,16 @@ ALLOWED_MAIN_DIFFS = {
     "model.phase_mult",
     "model.laplace_alpha",
     "model.distance_laplace_alpha",
+    "model.salience_alpha",
     "model.baseline_type",
+    # Free-text documentation; never affects the run.
+    "_doc",
+}
+
+# Only allowed when the pair is explicitly declared FLOPs-matched:
+# HLA has slightly more compute per token, so it gets fewer steps.
+FLOPS_MATCHED_EXTRA_DIFFS = {
+    "max_steps",
 }
 
 
@@ -45,13 +54,24 @@ def tokens_per_update(cfg: Dict[str, Any]) -> int:
     return int(cfg["batch_size_per_device"]) * int(cfg["num_cores"]) * int(cfg["model"]["block_size"]) * int(cfg["grad_accum"])
 
 
-def validate_pair(base_path: str, hla_path: str) -> None:
+def validate_pair(base_path: str, hla_path: str, *, flops_matched: bool = False) -> None:
     base, hla = load(base_path), load(hla_path)
     diffs = diff(base, hla)
-    illegal = [x for x in diffs if x[0] not in ALLOWED_MAIN_DIFFS]
+    allowed = set(ALLOWED_MAIN_DIFFS)
+    if flops_matched:
+        allowed |= FLOPS_MATCHED_EXTRA_DIFFS
+    illegal = [x for x in diffs if x[0] not in allowed]
     if illegal:
         text = "\n".join(f"  {k}: base={a!r}, hla={b!r}" for k, a, b in illegal)
         raise RuntimeError("Illegal base/HLA config differences:\n" + text)
+    if flops_matched and any(k == "max_steps" for k, _, _ in diffs):
+        bs, hs = int(base["max_steps"]), int(hla["max_steps"])
+        if hs > bs:
+            raise RuntimeError(
+                f"FLOPs-matched pair expects HLA max_steps <= base (HLA costs more per token), "
+                f"got base={bs}, hla={hs}"
+            )
+        print(f"[flops-matched] max_steps: base={bs:,} hla={hs:,} (hla {100*hs/bs:.1f}% of base)")
 
     for cfg, name in [(base, "base"), (hla, "hla")]:
         for k in ["train_path", "val_path", "init_ckpt", "save_dir", "run_name"]:
@@ -76,8 +96,13 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", required=True)
     ap.add_argument("--hla", required=True)
+    ap.add_argument(
+        "--flops-matched",
+        action="store_true",
+        help="Pair is FLOPs-matched: allow max_steps to differ (HLA <= base).",
+    )
     args = ap.parse_args()
-    validate_pair(args.base, args.hla)
+    validate_pair(args.base, args.hla, flops_matched=args.flops_matched)
 
 
 if __name__ == "__main__":

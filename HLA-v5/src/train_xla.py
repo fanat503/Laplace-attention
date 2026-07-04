@@ -46,6 +46,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import numpy as np
 import torch
+import torch.nn as nn
 from torch.utils.data import DataLoader, Sampler
 
 import torch_xla.core.xla_model as xm
@@ -61,7 +62,7 @@ _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 if _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)
 
-from src.model import GPT, GPTConfig  # noqa: E402
+from src.model import GPT, GPTConfig, RMSNorm  # noqa: E402
 from src.data import FixedDataset, fixed_token_collate, worker_init_fn  # noqa: E402
 from src.eval import evaluate_induction, measure_attention_entropy, phase_statistics  # noqa: E402
 
@@ -69,6 +70,22 @@ try:  # Optional but recommended: gate/mix/angle statistics for HLA runs.
     from src.eval import hla_statistics  # type: ignore  # noqa: E402
 except Exception:  # pragma: no cover
     hla_statistics = None
+
+try:  # Optional: spectral (SVD) diagnostics of attention weights.
+    from src.eval import svd_statistics  # type: ignore  # noqa: E402
+except Exception:  # pragma: no cover
+    svd_statistics = None
+
+try:  # Optional: cross-head QK/OV subspace interference (Transformer Circuits).
+    from src.eval import head_interference_statistics  # type: ignore  # noqa: E402
+except Exception:  # pragma: no cover
+    head_interference_statistics = None
+
+try:  # Optional: induction-under-noise probe + learned depth/head profiles.
+    from src.eval import evaluate_distractor_induction, depth_profile_statistics  # type: ignore  # noqa: E402
+except Exception:  # pragma: no cover
+    evaluate_distractor_induction = None
+    depth_profile_statistics = None
 
 
 # =============================================================================
@@ -423,13 +440,33 @@ def count_parameters(model: torch.nn.Module) -> Dict[str, int]:
     return groups
 
 
+HLA_NODECAY_MARKERS = (
+    "W_phase_q", "W_phase_k", "W_phase_scale",
+    "W_range_k", "W_range_v",
+    "W_gate_k", "W_gate_v", "W_gate_sal",
+    "W_layer_temp",
+)
+
+
 def make_optimizer(model: torch.nn.Module, config: Dict[str, Any]) -> torch.optim.Optimizer:
+    """AdamW with weight decay on matrices only, EXCLUDING all HLA parameters.
+
+    Rationale: weight decay pulls parameters toward zero. For HLA parameters
+    zero *is* the identity state, so decaying them applies a constant force
+    against the mechanisms themselves (the 3-D W_phase tensors and the 2-D
+    gate Linears would otherwise fall into the decay group). Gates/scales are
+    conventionally excluded from decay for exactly this reason. This also
+    keeps base-vs-HLA sterile: in base these params receive no gradient and
+    AdamW skips grad-less params, so excluding them changes nothing for base.
+    """
     decay: List[torch.nn.Parameter] = []
     nodecay: List[torch.nn.Parameter] = []
-    for _, p in model.named_parameters():
+    for name, p in model.named_parameters():
         if not p.requires_grad:
             continue
-        if p.dim() >= 2:
+        if any(m in name for m in HLA_NODECAY_MARKERS):
+            nodecay.append(p)
+        elif p.dim() >= 2:
             decay.append(p)
         else:
             nodecay.append(p)
@@ -834,7 +871,13 @@ def validation_loss_xla(
 
 
 @torch.no_grad()
-def master_extra_metrics(model: torch.nn.Module, device: torch.device, config: Dict[str, Any]) -> Dict[str, float]:
+def master_extra_metrics(
+    model: torch.nn.Module,
+    device: torch.device,
+    config: Dict[str, Any],
+    *,
+    with_svd: bool = False,
+) -> Dict[str, float]:
     metrics: Dict[str, float] = {}
     was_training = model.training
     model.eval()
@@ -858,6 +901,22 @@ def master_extra_metrics(model: torch.nn.Module, device: torch.device, config: D
             master_print(f"[WARN] phase_statistics failed: {e}")
             metrics["phase_norm"] = float("nan")
 
+        if evaluate_distractor_induction is not None:
+            try:
+                for k, v in evaluate_distractor_induction(
+                    model, device=device, seed=int(config.get("seed", 42))
+                ).items():
+                    metrics[str(k)] = float(v)
+            except Exception as e:
+                master_print(f"[WARN] evaluate_distractor_induction failed: {e}")
+
+        if depth_profile_statistics is not None:
+            try:
+                for k, v in depth_profile_statistics(model).items():
+                    metrics[str(k)] = float(v)
+            except Exception as e:
+                master_print(f"[WARN] depth_profile_statistics failed: {e}")
+
         if hla_statistics is not None:
             try:
                 for k, v in hla_statistics(model).items():
@@ -867,6 +926,27 @@ def master_extra_metrics(model: torch.nn.Module, device: torch.device, config: D
                         pass
             except Exception as e:
                 master_print(f"[WARN] hla_statistics failed: {e}")
+
+        # Spectral (SVD) diagnostics are relatively expensive (CPU SVD of
+        # c_attn blocks and per-head phase matrices), so they run only when
+        # explicitly requested via with_svd (see svd_every config knob).
+        if with_svd and svd_statistics is not None:
+            try:
+                t0 = time.time()
+                for k, v in svd_statistics(model).items():
+                    metrics[f"svd_{k}"] = float(v)
+                master_print(f"[SVD] computed in {time.time() - t0:.1f}s")
+            except Exception as e:
+                master_print(f"[WARN] svd_statistics failed: {e}")
+
+        if with_svd and head_interference_statistics is not None:
+            try:
+                t0 = time.time()
+                for k, v in head_interference_statistics(model).items():
+                    metrics[str(k)] = float(v)
+                master_print(f"[Interference] computed in {time.time() - t0:.1f}s")
+            except Exception as e:
+                master_print(f"[WARN] head_interference_statistics failed: {e}")
     finally:
         model.train(was_training)
     return metrics
@@ -909,6 +989,22 @@ def open_csv(save_dir: str, run_name: str, config: Dict[str, Any], param_report:
             "gate_v_mean",
             "mix_k_mean",
             "mix_v_mean",
+            "svd_phase_erank",
+            "svd_phase_top1",
+            "svd_qk_stable_rank",
+            "svd_v_stable_rank",
+            "svd_gate_erank",
+            "qk_interference",
+            "ov_interference",
+            "qk_ov_separation",
+            "angle_q_sat_frac",
+            "angle_k_sat_frac",
+            "gate_k_sat_frac",
+            "gate_v_sat_frac",
+            "distractor_induction",
+            "distractor_margin",
+            "layer_temp_last",
+            "phase_budget_mean",
         ])
     else:
         writer.writerow([])
@@ -1108,6 +1204,10 @@ def _train_worker_fn(index: int, config: Dict[str, Any]) -> None:
     grad_clip = float(config.get("grad_clip", 1.0))
     log_every = int(config.get("log_every", 100))
     val_every = int(config.get("val_every", log_every))
+    # SVD diagnostics cadence: every N optimizer steps (0 = disabled).
+    # Runs on master only, inside the eval window. ~seconds per call on CPU
+    # for <=1B models; keep it a multiple of val_every.
+    svd_every = int(config.get("svd_every", 0))
     resume_every = int(config.get("resume_every", max(1, log_every)))
     save_every = int(config.get("save_every", 0))
     val_batches = int(config.get("val_batches", 50))
@@ -1285,7 +1385,12 @@ def _train_worker_fn(index: int, config: Dict[str, Any]) -> None:
                     val_ppl = math.exp(val_loss) if math.isfinite(val_loss) and val_loss < 20 else float("inf")
                     rendezvous("post_val_loss")
                     if master:
-                        metrics.update(master_extra_metrics(model, device, config))
+                        want_svd = svd_every > 0 and (
+                            completed_step % svd_every == 0 or completed_step >= max_steps
+                        )
+                        metrics.update(
+                            master_extra_metrics(model, device, config, with_svd=want_svd)
+                        )
                     rendezvous("post_master_metrics")
 
                     # Save best immediately after eval, before latest, so latest has updated best_val.
@@ -1332,6 +1437,22 @@ def _train_worker_fn(index: int, config: Dict[str, Any]) -> None:
                         fmt(metrics.get("gate_v_mean", float("nan"))),
                         fmt(metrics.get("mix_k_mean", float("nan"))),
                         fmt(metrics.get("mix_v_mean", float("nan"))),
+                        fmt(metrics.get("svd_phase_erank", float("nan"))),
+                        fmt(metrics.get("svd_phase_top1", float("nan"))),
+                        fmt(metrics.get("svd_qk_stable_rank", float("nan"))),
+                        fmt(metrics.get("svd_v_stable_rank", float("nan"))),
+                        fmt(metrics.get("svd_gate_erank", float("nan"))),
+                        fmt(metrics.get("qk_interference", float("nan"))),
+                        fmt(metrics.get("ov_interference", float("nan"))),
+                        fmt(metrics.get("qk_ov_separation", float("nan"))),
+                        fmt(metrics.get("angle_q_sat_frac", float("nan"))),
+                        fmt(metrics.get("angle_k_sat_frac", float("nan"))),
+                        fmt(metrics.get("gate_k_sat_frac", float("nan"))),
+                        fmt(metrics.get("gate_v_sat_frac", float("nan"))),
+                        fmt(metrics.get("distractor_induction", float("nan"))),
+                        fmt(metrics.get("distractor_margin", float("nan"))),
+                        fmt(metrics.get("layer_temp_last", float("nan"))),
+                        fmt(metrics.get("phase_budget_mean", float("nan"))),
                     ])
                     csv_file.flush()
                     master_print(
@@ -1417,14 +1538,22 @@ def _train_worker_fn(index: int, config: Dict[str, Any]) -> None:
                 save_dir, f"crash_rank{rank}_{run_name}_step{completed_step}_resume.pt"
             )
             # Build payload locally (no xm.save dependency).
+            def _to_cpu(obj: Any) -> Any:
+                # Recursively move tensors to CPU. optimizer.state_dict() contains
+                # both dicts ('state') and lists ('param_groups'), so a flat
+                # dict-comprehension would crash here - exactly when we least
+                # want the crash-saver itself to crash.
+                if torch.is_tensor(obj):
+                    return obj.detach().cpu()
+                if isinstance(obj, dict):
+                    return {k: _to_cpu(v) for k, v in obj.items()}
+                if isinstance(obj, (list, tuple)):
+                    return type(obj)(_to_cpu(v) for v in obj)
+                return obj
+
             payload = {
-                "model": {k: v.detach().cpu() for k, v in model.state_dict().items()},
-                "optimizer": (
-                    {k: {kk: vv.cpu() if torch.is_tensor(vv) else vv
-                         for kk, vv in v.items()}
-                     for k, v in (optimizer.state_dict() if optimizer else {}).items()}
-                    if optimizer is not None else None
-                ),
+                "model": _to_cpu(model.state_dict()),
+                "optimizer": _to_cpu(optimizer.state_dict()) if optimizer is not None else None,
                 "step": int(completed_step),
                 "best_val": float(best_val),
                 "config": config,

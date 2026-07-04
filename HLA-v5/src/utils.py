@@ -1,5 +1,18 @@
 # === Common helpers extracted from train_xla.py and make_init.py ===
 
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import random
+from pathlib import Path
+from typing import Any, Dict
+
+import numpy as np
+import torch
+
+
 def seed_everything(seed: int) -> None:
     """Seed all random sources for paper-grade reproducibility.
 
