@@ -34,7 +34,7 @@ HLA adds four mechanisms to causal self-attention. Each is per-head, content-con
 
 Earlier iterations (v3/v4) showed a **−0.09 validation-loss gap** at 100M params. v5 is the infrastructure to find out — rigorously — whether that survives scale.
 
-## ⚙️ Four mechanisms, one principle
+## Four mechanisms, one principle
 
 *Every formula below is the actual code (`src/model.py`), not a simplification.*
 
