@@ -6,7 +6,7 @@
 
 **A drop-in attention mechanism that separates *finding* tokens from *transmitting* them —<br>starting as a bit-exact standard Transformer and learning how much separation it needs.**
 
-[![Tests](https://img.shields.io/badge/tests-119%20passing-brightgreen)](tests/) [![Sterile](https://img.shields.io/badge/comparisons-bit--exact%20sterile-blueviolet)](#-sterile-by-construction) [![Metrics](https://img.shields.io/badge/metrics-documented-blue)](docs/METRICS.md) [![PyTorch](https://img.shields.io/badge/PyTorch-2.x%20%7C%20XLA%2FTPU-orange)](configs/) [![License](https://img.shields.io/badge/license-MIT-lightgrey)](../LICENSE)
+[![Tests](https://img.shields.io/badge/tests-119%20passing-brightgreen)](HLA-v5/tests/) [![Sterile](https://img.shields.io/badge/comparisons-bit--exact%20sterile-blueviolet)](#-sterile-by-construction) [![Metrics](https://img.shields.io/badge/metrics-documented-blue)](HLA-v5/docs/METRICS.md) [![PyTorch](https://img.shields.io/badge/PyTorch-2.x%20%7C%20XLA%2FTPU-orange)](HLA-v5/configs/) [![License](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
 
 [The problem](#-the-problem) · [The idea](#-the-idea) · [Mechanisms](#-four-mechanisms-one-principle) · [Sterility](#-sterile-by-construction) · [Diagnostics](#-measure-everything) · [Quick start](#-quick-start) · [Results](#-status--roadmap) · [FAQ](#-faq)
 
@@ -111,7 +111,7 @@ Ships with **parameter-matched** *and* **FLOPs-matched** config pairs (200M → 
 
 ## Measure everything
 
-Full math for every metric: [`docs/METRICS.md`](docs/METRICS.md). The highlights:
+Full math for every metric: [`docs/METRICS.md`](HLA-v5/docs/METRICS.md). The highlights:
 
 | Question | Metric (logged to CSV during training) |
 |---|---|
