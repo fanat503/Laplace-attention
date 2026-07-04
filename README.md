@@ -177,7 +177,7 @@ HLA-v5/
 
 Sterility (bit-exact identity, parameter matching, corrupted-init rejection) · causality (permutation tests, every mechanism) · math invariants (rotation isometry & invertibility, envelope bounds under saturation, budget bounds, batch invariance) · training (one-step parity from shared init, gradient flow to every *active* param, frozen *inactive* params, NaN-robustness at extreme weights) · backends (SDPA ↔ manual parity; SDPA refuses to silently drop active biases) · metric ground truth (interference = 0 for orthogonal heads, = self for identical heads; rank-1 collapse detection) · data & trainer (determinism, sharding without duplicates, exact-suffix resume, LR schedule endpoints).
 
-## 🗺️ Status & roadmap
+## Status & roadmap
 
 - [x] v3/v4: −0.09 val-loss gap @ 100M (pre-sterile-infrastructure)
 - [x] v5 infrastructure: mechanisms, sterility protocol, diagnostics, 117 tests
