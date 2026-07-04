@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🌀 HLA · Holographic Laplace Attention
+# HLA · Holographic Laplace Attention
 
 ### What if attention heads didn't have to whisper and listen through the same wire?
 
@@ -14,7 +14,7 @@
 
 ---
 
-## 🎯 The problem
+## The problem
 
 Every attention head in a Transformer does **two unrelated jobs with one set of vectors**:
 
@@ -25,7 +25,7 @@ Because both signals share the residual stream, they interfere: what one head *w
 
 Recent work attacks pieces of this: Differential Transformer subtracts the noise *after* matching, Forgetting Transformer decays distant scores, Selective Attention masks tokens out. **HLA goes after the root cause: give each job its own learned, controllable channel.**
 
-## 💡 The idea
+## The idea
 
 > **Phase carries "where to look". Magnitude carries "what is said."**
 > Like a hologram — where the image lives in interference patterns of phase, not in intensity.
@@ -34,18 +34,18 @@ HLA adds four mechanisms to causal self-attention. Each is per-head, content-con
 
 Earlier iterations (v3/v4) showed a **−0.09 validation-loss gap** at 100M params. v5 is the infrastructure to find out — rigorously — whether that survives scale.
 
-## ⚙️ Four mechanisms, one principle
+## Four mechanisms, one principle
 
 *Every formula below is the actual code (`src/model.py`), not a simplification.*
 
 | | Mechanism | Acts on | One-line intuition |
 |---|---|---|---|
-| 🧭 | **Phase rotation** | Q, K before matching | rotate retrieval into subspaces noise doesn't occupy |
-| 🎚️ | **Laplace gating** | K, V multiplicative | smooth per-token volume control for keys & values |
-| 🔦 | **Salience bias** | scores, additive | silence distractors ×0.135, amplify targets ×7.4 |
-| 📏 | **Distance bias** | scores, additive | let each key decide how far it should reach |
+| | **Phase rotation** | Q, K before matching | rotate retrieval into subspaces noise doesn't occupy |
+| | **Laplace gating** | K, V multiplicative | smooth per-token volume control for keys & values |
+| | **Salience bias** | scores, additive | silence distractors ×0.135, amplify targets ×7.4 |
+| | **Distance bias** | scores, additive | let each key decide how far it should reach |
 
-### 🧭 Content-conditioned phase rotation
+### Content-conditioned phase rotation
 
 ```
 angles = π · phase_mult · tanh(W_phase · x)          # per head, per token
@@ -77,7 +77,7 @@ score += clamp(α_s · range_s · tanh(W_sal · x_key), ±clip_s)
 
 Log-space and additive ⇒ unbounded suppression: at ±2 nats a distracting key drops to **×0.135** attention weight, an important key gains **×7.4** — independent of distance.
 
-### 📏 Distance-aware Laplace bias
+### Distance-aware Laplace bias
 
 ```
 score += clamp(α_d · range_d · dist(t,s) · gate_k(x_s), ±clip_d)
@@ -93,7 +93,7 @@ mult_l = 1 + (l/L) · softplus(θ_l) / softplus(0)      # one scalar per layer
 
 At θ=0 this **equals** the static heuristic `1 + l/L` exactly — then the model calibrates its own depth curve, logged live (`layer_temp_*`) as a free interpretability figure.
 
-## 🔒 Sterile by construction
+## Sterile by construction
 
 **The comparison methodology is a contribution in itself.** Base and HLA differ in *nothing* except the active mechanisms:
 
@@ -124,7 +124,7 @@ Full math for every metric: [`docs/METRICS.md`](docs/METRICS.md). The highlights
 
 Spectral & interference metrics run master-only every `svd_every` steps (~15 s @ 300M): **training is never slowed**.
 
-## 🚀 Quick start
+## Quick start
 
 ```bash
 pip install torch pytest                    # CPU is enough for tests & init
