@@ -58,7 +58,7 @@ An **isometry**: norms untouched (tested), only matching geometry changes. Compo
 
 **Depth-adaptive** (`layer_dependent_phase`): the budget scales with the same depth profile as the gates — deeper, more semantic layers may rotate more.
 
-### 🎚️ Residual Laplace gating (K & V)
+### Residual Laplace gating (K & V)
 
 ```
 gate  = tanh(W_gate · x)                              # per-key content
@@ -69,7 +69,7 @@ k, v  = k · mix_k,  v · mix_v
 
 Analytic envelope `mix ∈ [(1−β)+β·e^(−c), (1−β)+β·e^(c)]`; the clip is a numerical guard that never binds in shipped configs (verified). Note the deliberate **floor** (1−β): gating whispers, it cannot silence. Silencing is salience's job:
 
-### 🔦 Additive salience bias — no floor
+### Additive salience bias — no floor
 
 ```
 score += clamp(α_s · range_s · tanh(W_sal · x_key), ±clip_s)
@@ -85,7 +85,7 @@ score += clamp(α_d · range_d · dist(t,s) · gate_k(x_s), ±clip_d)
 
 **Bidirectional**, unlike a pure forget gate: negative-gate keys decay with distance, positive-gate keys *survive* at long range — each key's content decides.
 
-### 🌡️ Learned depth profile (optional everywhere)
+### Learned depth profile (optional everywhere)
 
 ```
 mult_l = 1 + (l/L) · softplus(θ_l) / softplus(0)      # one scalar per layer
@@ -109,7 +109,7 @@ At θ=0 this **equals** the static heuristic `1 + l/L` exactly — then the mode
 
 Ships with **parameter-matched** *and* **FLOPs-matched** config pairs (200M → 800M).
 
-## 📊 Measure everything
+## Measure everything
 
 Full math for every metric: [`docs/METRICS.md`](docs/METRICS.md). The highlights:
 
@@ -154,7 +154,7 @@ python src/train_xla.py --config configs/200m_hla_s42.json \
 > **Kaggle TPU v5e-8**: configs ship with `num_cores: 8` and `/kaggle/...` paths.
 > Ladder: `smoke` (10 steps) → `pilot` (1 000) → full runs.
 
-## 🗂️ Repository layout
+## Repository layout
 
 ```
 HLA-v5/
@@ -173,7 +173,7 @@ HLA-v5/
 └── tests/              # 117 CPU tests — run anywhere, no TPU needed
 ```
 
-## 🧪 117 tests = the paper's claims, executable
+## 117 tests = the paper's claims, executable
 
 Sterility (bit-exact identity, parameter matching, corrupted-init rejection) · causality (permutation tests, every mechanism) · math invariants (rotation isometry & invertibility, envelope bounds under saturation, budget bounds, batch invariance) · training (one-step parity from shared init, gradient flow to every *active* param, frozen *inactive* params, NaN-robustness at extreme weights) · backends (SDPA ↔ manual parity; SDPA refuses to silently drop active biases) · metric ground truth (interference = 0 for orthogonal heads, = self for identical heads; rank-1 collapse detection) · data & trainer (determinism, sharding without duplicates, exact-suffix resume, LR schedule endpoints).
 
@@ -188,7 +188,7 @@ Sterility (bit-exact identity, parameter matching, corrupted-init rejection) · 
 - [ ] Downstream evals (lm-eval-harness) + FoX baseline in the same sterile harness
 - [ ] Multi-B headline run (compute grants — reach out if you can help)
 
-## ❓ FAQ
+## FAQ
 
 <details>
 <summary><b>Isn't this what PoPE did?</b></summary>
