@@ -33,13 +33,14 @@ import re
 
 import numpy as np
 import torch
-
+import torch.nn as nn
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-if _THIS_DIR not in sys.path:
-    sys.path.insert(0, _THIS_DIR)
+_PARENT_DIR = os.path.dirname(_THIS_DIR)
+if _PARENT_DIR not in sys.path:
+    sys.path.insert(0, _PARENT_DIR)
 
-from src.model import GPT, GPTConfig  # noqa: E402
+from src.model import GPT, GPTConfig, RMSNorm  # noqa: E402
 
 
 def seed_everything(seed: int) -> None:
@@ -80,6 +81,9 @@ HLA_KEY_PATTERNS = (
     re.compile(r"\.W_range_v$"),
     re.compile(r"\.W_gate_k\.weight$"),  # nn.Linear weights
     re.compile(r"\.W_gate_v\.weight$"),
+    re.compile(r"\.W_gate_sal\.weight$"),
+    re.compile(r"\.W_layer_temp$"),
+    re.compile(r"\.W_phase_scale$"),
     re.compile(r"^memory_slots\.slot_values$"),
     re.compile(r"^memory_slots\.slot_queries$"),
     re.compile(r"^memory_slots\.w_scale$"),
@@ -114,7 +118,8 @@ def cast_state(state: Dict[str, torch.Tensor], dtype: Optional[torch.dtype]) -> 
 HLA_PARAMS_MUST_BE_ZERO = frozenset({
     "W_phase_q", "W_phase_k",
     "W_range_k", "W_range_v",
-    "W_gate_k", "W_gate_v",
+    "W_gate_k", "W_gate_v", "W_gate_sal",
+    "W_layer_temp", "W_phase_scale",
 })
 
 HLA_PARAMS_FIXED_INIT = frozenset({
@@ -203,7 +208,7 @@ def parameter_report(model: GPT) -> Dict[str, int]:
             groups["other"] += n
             continue
         # Categorise by owning module.
-        if any(is_hla_key(name) for _ in [0]):  # Use is_hla_key from M1 fix.
+        if is_hla_key(name):
             groups["hla"] += n
         elif isinstance(mod, nn.Embedding):
             groups["embedding"] += n
