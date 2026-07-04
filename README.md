@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🌀 HLA · Holographic Laplace Attention
+# HLA · Holographic Laplace Attention
 
 ### What if attention heads didn't have to whisper and listen through the same wire?
 
@@ -14,7 +14,7 @@
 
 ---
 
-## 🎯 The problem
+## The problem
 
 Every attention head in a Transformer does **two unrelated jobs with one set of vectors**:
 
@@ -25,7 +25,7 @@ Because both signals share the residual stream, they interfere: what one head *w
 
 Recent work attacks pieces of this: Differential Transformer subtracts the noise *after* matching, Forgetting Transformer decays distant scores, Selective Attention masks tokens out. **HLA goes after the root cause: give each job its own learned, controllable channel.**
 
-## 💡 The idea
+## The idea
 
 > **Phase carries "where to look". Magnitude carries "what is said."**
 > Like a hologram — where the image lives in interference patterns of phase, not in intensity.
@@ -40,12 +40,12 @@ Earlier iterations (v3/v4) showed a **−0.09 validation-loss gap** at 100M para
 
 | | Mechanism | Acts on | One-line intuition |
 |---|---|---|---|
-| 🧭 | **Phase rotation** | Q, K before matching | rotate retrieval into subspaces noise doesn't occupy |
-| 🎚️ | **Laplace gating** | K, V multiplicative | smooth per-token volume control for keys & values |
-| 🔦 | **Salience bias** | scores, additive | silence distractors ×0.135, amplify targets ×7.4 |
-| 📏 | **Distance bias** | scores, additive | let each key decide how far it should reach |
+| | **Phase rotation** | Q, K before matching | rotate retrieval into subspaces noise doesn't occupy |
+| | **Laplace gating** | K, V multiplicative | smooth per-token volume control for keys & values |
+| | **Salience bias** | scores, additive | silence distractors ×0.135, amplify targets ×7.4 |
+| | **Distance bias** | scores, additive | let each key decide how far it should reach |
 
-### 🧭 Content-conditioned phase rotation
+### Content-conditioned phase rotation
 
 ```
 angles = π · phase_mult · tanh(W_phase · x)          # per head, per token
@@ -58,7 +58,7 @@ An **isometry**: norms untouched (tested), only matching geometry changes. Compo
 
 **Depth-adaptive** (`layer_dependent_phase`): the budget scales with the same depth profile as the gates — deeper, more semantic layers may rotate more.
 
-### 🎚️ Residual Laplace gating (K & V)
+### Residual Laplace gating (K & V)
 
 ```
 gate  = tanh(W_gate · x)                              # per-key content
@@ -69,7 +69,7 @@ k, v  = k · mix_k,  v · mix_v
 
 Analytic envelope `mix ∈ [(1−β)+β·e^(−c), (1−β)+β·e^(c)]`; the clip is a numerical guard that never binds in shipped configs (verified). Note the deliberate **floor** (1−β): gating whispers, it cannot silence. Silencing is salience's job:
 
-### 🔦 Additive salience bias — no floor
+### Additive salience bias — no floor
 
 ```
 score += clamp(α_s · range_s · tanh(W_sal · x_key), ±clip_s)
@@ -77,7 +77,7 @@ score += clamp(α_s · range_s · tanh(W_sal · x_key), ±clip_s)
 
 Log-space and additive ⇒ unbounded suppression: at ±2 nats a distracting key drops to **×0.135** attention weight, an important key gains **×7.4** — independent of distance.
 
-### 📏 Distance-aware Laplace bias
+### Distance-aware Laplace bias
 
 ```
 score += clamp(α_d · range_d · dist(t,s) · gate_k(x_s), ±clip_d)
@@ -85,7 +85,7 @@ score += clamp(α_d · range_d · dist(t,s) · gate_k(x_s), ±clip_d)
 
 **Bidirectional**, unlike a pure forget gate: negative-gate keys decay with distance, positive-gate keys *survive* at long range — each key's content decides.
 
-### 🌡️ Learned depth profile (optional everywhere)
+### Learned depth profile (optional everywhere)
 
 ```
 mult_l = 1 + (l/L) · softplus(θ_l) / softplus(0)      # one scalar per layer
@@ -93,7 +93,7 @@ mult_l = 1 + (l/L) · softplus(θ_l) / softplus(0)      # one scalar per layer
 
 At θ=0 this **equals** the static heuristic `1 + l/L` exactly — then the model calibrates its own depth curve, logged live (`layer_temp_*`) as a free interpretability figure.
 
-## 🔒 Sterile by construction
+## Sterile by construction
 
 **The comparison methodology is a contribution in itself.** Base and HLA differ in *nothing* except the active mechanisms:
 
@@ -109,7 +109,7 @@ At θ=0 this **equals** the static heuristic `1 + l/L` exactly — then the mode
 
 Ships with **parameter-matched** *and* **FLOPs-matched** config pairs (200M → 800M).
 
-## 📊 Measure everything
+## Measure everything
 
 Full math for every metric: [`docs/METRICS.md`](docs/METRICS.md). The highlights:
 
@@ -124,7 +124,7 @@ Full math for every metric: [`docs/METRICS.md`](docs/METRICS.md). The highlights
 
 Spectral & interference metrics run master-only every `svd_every` steps (~15 s @ 300M): **training is never slowed**.
 
-## 🚀 Quick start
+## Quick start
 
 ```bash
 pip install torch pytest                    # CPU is enough for tests & init
@@ -156,7 +156,7 @@ python src/train_xla.py --config configs/200m_hla_s42.json \
 > **Kaggle TPU v5e-8**: configs ship with `num_cores: 8` and `/kaggle/...` paths.
 > Ladder: `smoke` (10 steps) → `pilot` (1 000) → full runs.
 
-## 🗂️ Repository layout
+## Repository layout
 
 ```
 HLA-v5/
@@ -175,11 +175,11 @@ HLA-v5/
 └── tests/              # 119 CPU tests — run anywhere, no TPU needed
 ```
 
-## 🧪 119 tests = the paper's claims, executable
+## 119 tests = the paper's claims, executable
 
 Sterility (bit-exact identity, parameter matching, corrupted-init rejection) · causality (permutation tests, every mechanism) · math invariants (rotation isometry & invertibility, envelope bounds under saturation, budget bounds, batch invariance) · training (one-step parity from shared init, gradient flow to every *active* param, frozen *inactive* params, NaN-robustness at extreme weights) · backends (SDPA ↔ manual parity; SDPA refuses to silently drop active biases) · metric ground truth (interference = 0 for orthogonal heads, = self for identical heads; rank-1 collapse detection) · data & trainer (determinism, sharding without duplicates, exact-suffix resume, LR schedule endpoints).
 
-## 🗺️ Status & roadmap
+## Status & roadmap
 
 - [x] v3/v4: −0.09 val-loss gap @ 100M (pre-sterile-infrastructure)
 - [x] v5 infrastructure: mechanisms, sterility protocol, diagnostics, 119 tests
@@ -190,7 +190,7 @@ Sterility (bit-exact identity, parameter matching, corrupted-init rejection) · 
 - [ ] Downstream evals (lm-eval-harness) + FoX baseline in the same sterile harness
 - [ ] Multi-B headline run (compute grants — reach out if you can help)
 
-## ❓ FAQ
+## FAQ
 
 <details>
 <summary><b>Isn't this what PoPE did?</b></summary>
