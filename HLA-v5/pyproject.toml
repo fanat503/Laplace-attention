@@ -1,0 +1,22 @@
+[project]
+name = "hla"
+version = "5.0.0"
+description = "Holographic Laplace Attention: decoupling retrieval from content transmission in softmax attention, with a sterile comparison harness"
+readme = "../README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "torch>=2.4,<2.13",
+    "numpy>=1.26,<3.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pyflakes>=3.2"]
+# TPU: install torch_xla matching your torch version (see requirements.txt)
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q -W error::UserWarning"
+
+[tool.setuptools]
+packages = ["src"]
