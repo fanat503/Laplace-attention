@@ -19,7 +19,6 @@ This script also:
 
 import os
 import json
-import math
 import time
 import hashlib
 from dataclasses import asdict

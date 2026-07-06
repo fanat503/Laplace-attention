@@ -239,6 +239,23 @@ class TestCompatChecks:
         with pytest.raises(ValueError):
             validate_init_config_compatibility(cur, saved)
 
+    def test_init_positional_scheme_mismatch_rejected(self):
+        """R19 (adversarial review round 2): an init checkpoint trained with
+        wpe must not silently load into a RoPE-only model."""
+        cur = {"model": {"n_embd": 32, "use_rope": True, "use_wpe": False}}
+        saved = {"model": {"n_embd": 32, "use_rope": False, "use_wpe": True}}
+        with pytest.raises(ValueError):
+            validate_init_config_compatibility(cur, saved)
+
+    def test_init_padded_vocab_mismatch_rejected(self):
+        # NOTE: None in the saved config means "unknown" (legacy checkpoint)
+        # and is deliberately skipped; only a *different concrete value* is
+        # an error. That is what we test here.
+        cur = {"model": {"n_embd": 32, "padded_vocab_size": 50304}}
+        saved = {"model": {"n_embd": 32, "padded_vocab_size": 50432}}
+        with pytest.raises(ValueError):
+            validate_init_config_compatibility(cur, saved)
+
     def test_none_saved_is_ok(self):
         validate_resume_config_compatibility({"seed": 1}, None)
         validate_init_config_compatibility({"model": {}}, None)
