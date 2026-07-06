@@ -195,7 +195,7 @@ Sterility (bit-exact identity, parameter matching, corrupted-init rejection) · 
 - [ ] Smoke + pilot @ Kaggle TPU v5e-8 ← **here**
 - [ ] 200M pairs: v1 (soft gates) & v2 (aggressive + salience), reproduce the gap sterile
 - [ ] Component ablations: phase / gates / salience / distance / learned-temp / per-head
-- [ ] ≥3 seeds, error bars → 300M FLOPs-matched → 700M scaling trend
+- [ ] ≥3 seeds, error bars → 300M FLOPs-matched → 7B scaling trend
 - [ ] Downstream evals (lm-eval-harness) + FoX baseline in the same sterile harness
 - [ ] Multi-B headline run (compute grants — reach out if you can help)
 
