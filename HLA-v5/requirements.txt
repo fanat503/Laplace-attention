@@ -1,0 +1,18 @@
+# Core (tests, init generation, analysis - CPU is enough)
+# Pin ranges chosen for reproducibility; exact versions recorded per-run in
+# environment.json by the trainer.
+torch>=2.4,<2.13
+numpy>=1.26,<3.0
+
+# Dev / CI
+pytest>=8.0
+pyflakes>=3.2
+
+# TPU training (Kaggle v5e-8 / TRC). Install the torch_xla matching your torch:
+#   pip install torch~=2.5.0 torch_xla[tpu]~=2.5.0 \
+#     -f https://storage.googleapis.com/libtpu-releases/index.html
+# torch_xla  # (uncomment on TPU hosts only)
+
+# Data preparation
+# datasets>=2.19   # (only for prepare_c4_data.py)
+# tiktoken>=0.6    # (tokenizer used in data prep)

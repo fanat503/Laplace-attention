@@ -173,8 +173,13 @@ class TestPaddedVocab:
 class TestGradients:
     def test_all_params_receive_grad_when_active(self):
         # Enable EVERY optional branch so every parameter is on an active path.
-        model = GPT(small_cfg(**HLA_KW, learnable_layer_temp=True, per_head_phase=True))
+        model = GPT(small_cfg(**HLA_KW, learnable_layer_temp=True, per_head_phase=True,
+                              use_forget_gate=True, forget_alpha=1.0))
         randomize_hla(model)
+        with torch.no_grad():
+            for blk in model.transformer.h:
+                blk.attn.W_gate_f.weight.normal_(0, 0.05)
+                blk.attn.W_range_f.normal_(0, 0.2)
         model.train()
         x = torch.randint(0, 256, (2, 32))
         _, loss = model(x, x)
@@ -243,7 +248,7 @@ class TestPositionalEncoding:
         shifted = torch.cat([torch.tensor([[99]]), x[:, :-1]], dim=1)
         l2, _ = model(shifted)
         # token x[0,5] is at position 5 in x and position 6 in shifted
-        diff = (l1[0, 5] - l2[0, 6]).abs().max()
+        diff = (l1[0, 5] - l2[0, 6]).detach().abs().max()
         assert float(diff) > 1e-4, "RoPE model must be position-sensitive"
 
     def test_param_match_rope_pair(self):
@@ -620,6 +625,225 @@ class TestMathematicalInvariants:
         l1, _ = model(x)
         l2, _ = model(x)
         assert torch.equal(l1, l2)
+
+
+class TestBf16AndRobustness:
+    """TPU reality checks: XLA_USE_BF16 casts everything to bf16."""
+
+    def test_identity_survives_bf16(self):
+        """Bit-exact base<->HLA identity must hold in bf16 (R11)."""
+        torch.manual_seed(1)
+        base = GPT(small_cfg(**BASE_KW)).eval()
+        hla = GPT(small_cfg(**HLA_KW)).eval()
+        hla.load_state_dict(base.state_dict(), strict=True)
+        hla.reset_hla_identity()
+        base_bf = base.to(torch.bfloat16)
+        hla_bf = hla.to(torch.bfloat16)
+        x = torch.randint(0, 256, (2, 32))
+        lb, _ = base_bf(x)
+        lh, _ = hla_bf(x)
+        assert torch.equal(lb, lh), "bf16 broke base<->HLA identity"
+
+    def test_full_flags_state_dict_roundtrip(self):
+        """Every optional mechanism on simultaneously: save/load must be exact (R14)."""
+        cfg = small_cfg(**HLA_KW, learnable_layer_temp=True, per_head_phase=True,
+                        layer_dependent_phase=True)
+        m1 = GPT(cfg)
+        m2 = GPT(cfg)
+        m2.load_state_dict(m1.state_dict(), strict=True)
+        for (n1, p1), (n2, p2) in zip(m1.named_parameters(), m2.named_parameters()):
+            assert n1 == n2 and torch.equal(p1, p2)
+
+    def test_parameter_order_deterministic(self):
+        """Optimizer state resume relies on identical parameter ordering (R15)."""
+        cfg = small_cfg(**HLA_KW, learnable_layer_temp=True, per_head_phase=True)
+        names1 = [n for n, _ in GPT(cfg).named_parameters()]
+        names2 = [n for n, _ in GPT(cfg).named_parameters()]
+        assert names1 == names2
+
+    def test_grad_checkpointing_with_all_flags(self):
+        """Gradient checkpointing must work with every mechanism active."""
+        torch.manual_seed(2)
+        cfg = small_cfg(**HLA_KW, learnable_layer_temp=True, per_head_phase=True,
+                        layer_dependent_phase=True, gradient_checkpointing=True)
+        model = GPT(cfg)
+        randomize_hla(model)
+        model.train()
+        x = torch.randint(0, 256, (2, 32))
+        _, loss = model(x, x)
+        loss.backward()
+        assert torch.isfinite(loss)
+
+
+class TestForgetGate:
+    """FoX-style cumulative gate: the external-baseline mechanism reproduced
+    inside the sterile harness."""
+
+    FKW = dict(use_forget_gate=True, forget_alpha=1.0, use_rope=True, use_wpe=False)
+
+    def test_identity_at_init(self):
+        torch.manual_seed(21)
+        base = GPT(small_cfg(**BASE_KW, use_forget_gate=True, forget_alpha=0.0)).eval()
+        fox = GPT(small_cfg(**BASE_KW, use_forget_gate=True, forget_alpha=1.0)).eval()
+        fox.load_state_dict(base.state_dict(), strict=True)
+        fox.reset_hla_identity()
+        x = torch.randint(0, 256, (2, 32))
+        lb, _ = base(x)
+        lf, _ = fox(x)
+        assert torch.equal(lb, lf)
+
+    def test_causality(self):
+        """Cumulative sums are the classic way to leak the future - verify not."""
+        model = GPT(small_cfg(**self.FKW)).eval()
+        with torch.no_grad():
+            for blk in model.transformer.h:
+                blk.attn.W_gate_f.weight.normal_(0, 0.5)
+                blk.attn.W_range_f.normal_(0, 0.5)
+        T = 32
+        a = torch.randint(0, 256, (1, T))
+        b = a.clone()
+        b[0, T - 1] = (b[0, T - 1] + 7) % 256
+        la, _ = model(a)
+        lb, _ = model(b)
+        assert torch.equal(la[0, : T - 1], lb[0, : T - 1]), "forget gate leaked future"
+
+    def test_negative_gate_is_recency_bias(self):
+        """All-negative gates => distant keys get MORE negative bias than
+        recent ones (monotone in distance) - the FoX forgetting semantics."""
+        model = GPT(small_cfg(**self.FKW, n_layer=1)).eval()
+        attn = model.transformer.h[0].attn
+        with torch.no_grad():
+            attn.W_gate_f.weight.fill_(-100.0)  # tanh -> -1 for every token
+        model.set_diagnostics(enabled=True, capture_attention=True)
+        x = torch.randint(0, 256, (1, 16))
+        model(x)
+        att = model.transformer.h[0].attn.last_attn[0, 0]  # (T, T)
+        # for the last query, attention should be concentrated near recent keys
+        last_row = att[-1]
+        recent_mass = float(last_row[-4:].sum())
+        distant_mass = float(last_row[:4].sum())
+        assert recent_mass > distant_mass, "negative forget gate must induce recency bias"
+
+    def test_grad_flows(self):
+        model = GPT(small_cfg(**self.FKW))
+        with torch.no_grad():
+            for blk in model.transformer.h:
+                blk.attn.W_gate_f.weight.normal_(0, 0.1)
+        x = torch.randint(0, 256, (2, 32))
+        _, loss = model(x, x)
+        loss.backward()
+        g = model.transformer.h[0].attn.W_gate_f.weight.grad
+        assert g is not None and float(g.abs().sum()) > 0
+
+    def test_parameter_matched(self):
+        a = GPT(small_cfg(**BASE_KW, use_forget_gate=True, forget_alpha=0.0))
+        b = GPT(small_cfg(**BASE_KW, use_forget_gate=True, forget_alpha=1.0))
+        assert a.parameter_count() == b.parameter_count()
+
+    def test_bias_respects_clip(self):
+        cfg = small_cfg(**self.FKW)
+        model = GPT(cfg).eval()
+        model.set_diagnostics(enabled=True)
+        with torch.no_grad():
+            for blk in model.transformer.h:
+                blk.attn.W_gate_f.weight.fill_(100.0)
+        x = torch.randint(0, 256, (1, 64))
+        model(x)
+        for blk in model.transformer.h:
+            assert float(blk.attn.last_forget_bias_abs_mean) <= cfg.forget_clip + 1e-5
+
+
+class TestGenerate:
+    """Autoregressive decoding: needed for lm-eval-harness downstream evals."""
+
+    def test_shapes_and_range(self):
+        model = GPT(small_cfg(**HLA_KW)).eval()
+        idx = torch.randint(0, 256, (2, 5))
+        out = model.generate(idx, max_new_tokens=7, greedy=True)
+        assert out.shape == (2, 12)
+        assert torch.equal(out[:, :5], idx), "prompt must be preserved"
+        assert int(out.max()) < 256 and int(out.min()) >= 0
+
+    def test_greedy_deterministic(self):
+        model = GPT(small_cfg(**HLA_KW)).eval()
+        idx = torch.randint(0, 256, (1, 4))
+        o1 = model.generate(idx, max_new_tokens=6, greedy=True)
+        o2 = model.generate(idx, max_new_tokens=6, greedy=True)
+        assert torch.equal(o1, o2)
+
+    def test_padded_vocab_never_sampled(self):
+        """Padded ids (>= vocab_size) must be impossible outputs."""
+        cfg = small_cfg(vocab_size=250, padded_vocab_size=256)
+        model = GPT(cfg).eval()
+        idx = torch.randint(0, 250, (2, 4))
+        torch.manual_seed(0)
+        out = model.generate(idx, max_new_tokens=20, temperature=2.0)
+        assert int(out.max()) < 250, "sampled a padded-vocab id!"
+
+    def test_context_cropping(self):
+        """Prompt longer than block_size must not crash (crop, not error)."""
+        model = GPT(small_cfg(**HLA_KW)).eval()
+        idx = torch.randint(0, 256, (1, 64))  # == block_size
+        out = model.generate(idx, max_new_tokens=3, greedy=True)
+        assert out.shape == (1, 67)
+
+    def test_restores_training_mode(self):
+        model = GPT(small_cfg(**HLA_KW)).train()
+        model.generate(torch.randint(0, 256, (1, 4)), max_new_tokens=2, greedy=True)
+        assert model.training
+
+    def test_t1_prompt(self):
+        """Single-token prompt (R29 edge case) with ALL mechanisms active."""
+        model = GPT(small_cfg(**HLA_KW)).eval()
+        out = model.generate(torch.randint(0, 256, (1, 1)), max_new_tokens=3, greedy=True)
+        assert out.shape == (1, 4)
+
+
+class TestDiagnosticsGating:
+    def test_dropout_nonzero_rejected(self):
+        """R26: dropout is not implemented - a non-zero value must refuse to
+        construct rather than silently do nothing."""
+        with pytest.raises(ValueError):
+            small_cfg(dropout=0.1)
+
+    def test_entropy_not_computed_in_training(self):
+        """R31: entropy is eval-only; training forwards must skip it."""
+        model = GPT(small_cfg(**HLA_KW))
+        model.train()
+        x = torch.randint(0, 256, (1, 16))
+        model(x, x)
+        assert model.transformer.h[0].attn.last_entropy is None
+
+    def test_entropy_computed_in_eval(self):
+        model = GPT(small_cfg(**HLA_KW)).eval()
+        x = torch.randint(0, 256, (1, 16))
+        model(x)
+        e = model.transformer.h[0].attn.last_entropy
+        assert e is not None and torch.isfinite(e).all()
+
+    def test_entropy_computed_in_training_with_diagnostics(self):
+        model = GPT(small_cfg(**HLA_KW))
+        model.train()
+        model.set_diagnostics(enabled=True)
+        x = torch.randint(0, 256, (1, 16))
+        model(x, x)
+        assert model.transformer.h[0].attn.last_entropy is not None
+
+
+class TestRotationAlgebra:
+    def test_rotation_composition(self):
+        """R25: R(a) . R(a) == R(2a) - the pairwise map is a true rotation group
+        action, not just any norm-preserving transform."""
+        model = GPT(small_cfg(**HLA_KW)).eval()
+        attn = model.transformer.h[0].attn
+        x = torch.randn(1, 4, 8, attn.head_dim)
+        ang = torch.rand(1, 4, 8, attn.head_dim // 2)
+        twice = attn._rotate_pairwise(
+            attn._rotate_pairwise(x, torch.cos(ang), torch.sin(ang)),
+            torch.cos(ang), torch.sin(ang),
+        )
+        direct = attn._rotate_pairwise(x, torch.cos(2 * ang), torch.sin(2 * ang))
+        assert torch.allclose(twice, direct, atol=1e-5)
 
 
 class TestConfigValidation:

@@ -6,7 +6,7 @@
 
 **A drop-in attention mechanism that separates *finding* tokens from *transmitting* them —<br>starting as a bit-exact standard Transformer and learning how much separation it needs.**
 
-[![Tests](https://img.shields.io/badge/tests-119%20passing-brightgreen)](HLA-v5/tests/) [![Sterile](https://img.shields.io/badge/comparisons-bit--exact%20sterile-blueviolet)](#-sterile-by-construction) [![Metrics](https://img.shields.io/badge/metrics-documented-blue)](HLA-v5/docs/METRICS.md) [![PyTorch](https://img.shields.io/badge/PyTorch-2.x%20%7C%20XLA%2FTPU-orange)](HLA-v5/configs/) [![License](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
+[![tests](https://github.com/fanat503/Laplace-attention/actions/workflows/tests.yml/badge.svg)](https://github.com/fanat503/Laplace-attention/actions/workflows/tests.yml) [![Sterile](https://img.shields.io/badge/comparisons-bit--exact%20sterile-blueviolet)](#-sterile-by-construction) [![Metrics](https://img.shields.io/badge/metrics-documented-blue)](HLA-v5/docs/METRICS.md) [![PyTorch](https://img.shields.io/badge/PyTorch-2.x%20%7C%20XLA%2FTPU-orange)](HLA-v5/configs/) [![License](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
 
 [The problem](#-the-problem) · [The idea](#-the-idea) · [Mechanisms](#-four-mechanisms-one-principle) · [Sterility](#-sterile-by-construction) · [Diagnostics](#-measure-everything) · [Quick start](#-quick-start) · [Results](#-status--roadmap) · [FAQ](#-faq)
 
@@ -85,6 +85,15 @@ score += clamp(α_d · range_d · dist(t,s) · gate_k(x_s), ±clip_d)
 
 **Bidirectional**, unlike a pure forget gate: negative-gate keys decay with distance, positive-gate keys *survive* at long range — each key's content decides.
 
+### FoX-style cumulative forget gate (baseline mechanism, built-in)
+
+```
+S_t     = cumsum( α_f · range_f · tanh(W_f · x_t) )
+score  += clamp(S_i − S_j, ±clip_f)
+```
+
+The Forgetting-Transformer hypothesis (cumulative data-dependent decay), reproduced **inside the sterile harness**: identity-init, parameter-matched, same data — enabling the cleanest FoX-vs-HLA comparison possible. Use it as an ablation arm or as an external-baseline run.
+
 ### Learned depth profile (optional everywhere)
 
 ```
@@ -111,7 +120,7 @@ Ships with **parameter-matched** *and* **FLOPs-matched** config pairs (200M → 
 
 ## Measure everything
 
-Full math for every metric: [`docs/METRICS.md`](HLA-v5/docs/METRICS.md). The highlights:
+Full math for every metric: [`docs/METRICS.md`](HLA-v5/docs/METRICS.md) · unified formula & theorems: [`docs/THEORY.md`](HLA-v5/docs/THEORY.md) · formal sterility protocol: [`docs/STERILITY.md`](HLA-v5/docs/STERILITY.md) · pre-registration: [`docs/EXPERIMENT_CARD.md`](HLA-v5/docs/EXPERIMENT_CARD.md). The highlights:
 
 | Question | Metric (logged to CSV during training) |
 |---|---|
@@ -131,7 +140,7 @@ pip install torch pytest                    # CPU is enough for tests & init
 cd HLA-v5
 
 # 0 · Trust nothing, verify (always, before any TPU time)
-python -m pytest tests/ -q                  # → 119 passed
+python -m pytest tests/ -q                  # → 162 passed
 
 # 1 · Sterility gate + numeric sanity audit for the config pair
 python scripts/validate_configs.py \
@@ -172,17 +181,17 @@ HLA-v5/
 │                       #   v2 recipe (aggressive envelope + salience), pilot, smoke
 ├── scripts/            # validate_configs, sterility audit, data prep, analysis
 ├── docs/METRICS.md     # exact math of every metric
-└── tests/              # 119 CPU tests — run anywhere, no TPU needed
+└── tests/              # 162 CPU tests — run anywhere, no TPU needed
 ```
 
-## 119 tests = the paper's claims, executable
+## 162 tests = the paper's claims, executable
 
 Sterility (bit-exact identity, parameter matching, corrupted-init rejection) · causality (permutation tests, every mechanism) · math invariants (rotation isometry & invertibility, envelope bounds under saturation, budget bounds, batch invariance) · training (one-step parity from shared init, gradient flow to every *active* param, frozen *inactive* params, NaN-robustness at extreme weights) · backends (SDPA ↔ manual parity; SDPA refuses to silently drop active biases) · metric ground truth (interference = 0 for orthogonal heads, = self for identical heads; rank-1 collapse detection) · data & trainer (determinism, sharding without duplicates, exact-suffix resume, LR schedule endpoints).
 
 ## Status & roadmap
 
 - [x] v3/v4: −0.09 val-loss gap @ 100M (pre-sterile-infrastructure)
-- [x] v5 infrastructure: mechanisms, sterility protocol, diagnostics, 119 tests
+- [x] v5 infrastructure: mechanisms, sterility protocol, diagnostics, 162 tests
 - [ ] Smoke + pilot @ Kaggle TPU v5e-8 ← **here**
 - [ ] 200M pairs: v1 (soft gates) & v2 (aggressive + salience), reproduce the gap sterile
 - [ ] Component ablations: phase / gates / salience / distance / learned-temp / per-head

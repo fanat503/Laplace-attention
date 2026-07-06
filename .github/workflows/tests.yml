@@ -1,0 +1,56 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: HLA-v5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies (CPU torch)
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy pytest pyflakes
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Lint (pyflakes, fail on real errors only)
+        run: |
+          # unused imports are style, undefined names are bugs - fail only on the latter
+          python -m pyflakes src/ scripts/ tests/ | tee /tmp/pyflakes.txt || true
+          ! grep -E "undefined name|invalid syntax" /tmp/pyflakes.txt
+
+      - name: Run test suite (warnings are errors)
+        run: python -m pytest tests/ -q --tb=short -W error::UserWarning
+
+      - name: Config sterility gate (all base/HLA pairs)
+        run: |
+          python scripts/validate_configs.py --base configs/200m_base_s42.json    --hla configs/200m_hla_s42.json
+          python scripts/validate_configs.py --base configs/200m_base_v2_s42.json --hla configs/200m_hla_v2_s42.json
+          python scripts/validate_configs.py --base configs/300m_base_s42.json    --hla configs/300m_hla_s42.json --flops-matched
+          python scripts/validate_configs.py --base configs/600m_base_15b_s42.json --hla configs/600m_hla_15b_s42.json
+          python scripts/validate_configs.py --base configs/700m_base_14b_s42.json --hla configs/700m_hla_14b_s42.json
+          python scripts/validate_configs.py --base configs/800m_base_s42.json    --hla configs/800m_hla_s42.json
+
+      - name: Config value audit (numeric sanity)
+        run: python scripts/audit_config_values.py --all
+
+      - name: Repository sterility audit
+        run: python scripts/audit_sterility.py

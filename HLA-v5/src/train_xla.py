@@ -353,6 +353,15 @@ def validate_init_config_compatibility(current: Dict[str, Any], saved: Optional[
         "model.n_layer",
         "model.n_head",
         "model.n_embd",
+        # Shape/architecture toggles: an init checkpoint with a different
+        # positional scheme or padded vocab is structurally incompatible;
+        # catch it here with a clear message rather than in strict-load (or,
+        # worse, silently when init_strict=false).
+        "model.use_wpe",
+        "model.use_rope",
+        "model.padded_vocab_size",
+        "model.fused_swiglu",
+        "model.ffn_hidden_multiple_of",
     ]
     mismatches = []
     for k in critical:
@@ -442,8 +451,8 @@ def count_parameters(model: torch.nn.Module) -> Dict[str, int]:
 
 HLA_NODECAY_MARKERS = (
     "W_phase_q", "W_phase_k", "W_phase_scale",
-    "W_range_k", "W_range_v",
-    "W_gate_k", "W_gate_v", "W_gate_sal",
+    "W_range_k", "W_range_v", "W_range_f",
+    "W_gate_k", "W_gate_v", "W_gate_sal", "W_gate_f",
     "W_layer_temp",
 )
 
@@ -635,6 +644,15 @@ def build_train_loader(
         batch_size=batch_size,
         start_local_sample=start_local_sample,
     )
+    if len(sampler) == 0 and start_local_sample == 0:
+        # R22 (adversarial review round 2): with dataset_len < world_size *
+        # batch_size the even sampler drops EVERYTHING and training would
+        # silently loop over zero batches. Fail loudly with the fix hint.
+        raise ValueError(
+            f"Train dataset too small for even sharding: {len(ds)} sequences "
+            f"< world_size*batch_size = {world_size * batch_size}. "
+            f"Reduce batch_size_per_device/num_cores or provide more data."
+        )
     loader = DataLoader(
         ds,
         batch_size=batch_size,

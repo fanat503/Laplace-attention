@@ -16,49 +16,65 @@ from typing import Iterable, List
 ROOT = Path(__file__).resolve().parents[1]
 
 REQUIRED_FILES = [
-    "train_xla.py",
-    "make_init.py",
     "src/model.py",
     "src/data.py",
     "src/eval.py",
+    "src/train_xla.py",
+    "src/make_init.py",
+    "src/manifest.py",
+    "src/utils.py",
     "src/__init__.py",
     "scripts/verify_run.py",
     "scripts/analyze_checkpoint.py",
     "scripts/analyze_subspaces.py",
+    "scripts/audit_config_values.py",
     "scripts/check_dataloader.py",
     "scripts/check_environment.py",
     "scripts/compare_attention_kl.py",
     "scripts/count_params.py",
     "scripts/create_run_manifest.py",
-    "scripts/download_data_gcs.sh",
     "scripts/estimate_budget.py",
     "scripts/compare_inits.py",
     "scripts/inspect_checkpoint.py",
+    "scripts/make_ablation_configs.py",
     "scripts/make_dummy_data.py",
     "scripts/make_plots.py",
     "scripts/prepare_c4_data.py",
     "scripts/validate_log.py",
     "scripts/validate_configs.py",
     "scripts/validate_data_pair.py",
-    "configs/800m_base_s42.json",
-    "configs/800m_hla_s42.json",
+    "configs/200m_base_s42.json",
+    "configs/200m_hla_s42.json",
+    "configs/200m_base_v2_s42.json",
+    "configs/200m_hla_v2_s42.json",
     "configs/700m_base_14b_s42.json",
     "configs/700m_hla_14b_s42.json",
-    "requirements_tpu.txt",
-    "requirements_data.txt",
-    "requirements_dev.txt",
+    "configs/800m_base_s42.json",
+    "configs/800m_hla_s42.json",
+    "tests/test_model.py",
+    "tests/test_data.py",
+    "tests/test_eval.py",
+    "tests/test_make_init.py",
+    "tests/test_train_utils.py",
+    "tests/test_theory.py",
+    "tests/test_ablation_configs.py",
+    "requirements.txt",
     "pyproject.toml",
-    "README.md",
-    "STERILITY.md",
-    "NEURIPS_DIRECTION.md",
-    "ORAL_READINESS.md",
-    "DATA_CARD.md",
-    "EXPERIMENT_CARD.md",
+    "docs/METRICS.md",
+    "docs/STERILITY.md",
+    "docs/THEORY.md",
+    "docs/EXPERIMENT_CARD.md",
+    "docs/DATA_CARD.md",
 ]
 
 FORBIDDEN_TRAIN_STRINGS = [
     "from accelerate import",
-    "torch.cuda",
+    # NOTE: bare "torch.cuda" is allowed in seed_everything (harmless,
+    # guarded by is_available); forbid actual GPU placement/config instead.
+    ".to('cuda')",
+    '.to("cuda")',
+    'device="cuda"',
+    "device='cuda'",
     "PYTORCH_CUDA_ALLOC_CONF",
 ]
 
@@ -118,7 +134,7 @@ def check_model() -> None:
 
 
 def check_train() -> None:
-    s = read("train_xla.py")
+    s = read("src/train_xla.py")
     for bad in FORBIDDEN_TRAIN_STRINGS:
         if bad in s:
             fail(f"train_xla.py contains forbidden GPU/Accelerate string: {bad}")
@@ -151,8 +167,12 @@ def check_main_configs() -> None:
         "run_name",
         "save_dir",
         "init_ckpt",
+        "_doc",
         "model.phase_mult",
         "model.laplace_alpha",
+        "model.distance_laplace_alpha",
+        "model.salience_alpha",
+        "model.forget_alpha",
         "model.baseline_type",
     }
     base = __import__("json").loads(read("configs/800m_base_s42.json"))

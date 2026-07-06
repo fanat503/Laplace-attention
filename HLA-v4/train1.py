@@ -316,10 +316,32 @@ class GPT(nn.Module):
 
         self.apply(self._init_weights)
 
+        # CRITICAL FIX (backported from HLA-v5): apply(_init_weights) above
+        # re-initializes W_gate_k/W_gate_v (nn.Linear) with noise, silently
+        # breaking identity-at-init. Reset all HLA params AFTER generic init.
+        self.reset_hla_identity()
+
         # tie weights AFTER init, so shared weight is not initialized twice
         self.lm_head.weight = self.transformer.wte.weight
 
         self.gradient_checkpointing = config.gradient_checkpointing
+
+    def reset_hla_identity(self):
+        with torch.no_grad():
+            for block in self.transformer.h:
+                a = block.attn
+                a.W_phase_q.zero_(); a.W_phase_k.zero_()
+                a.W_range_k.zero_(); a.W_range_v.zero_()
+                a.W_gate_k.weight.zero_(); a.W_gate_v.weight.zero_()
+
+    def hla_identity_error(self):
+        err = 0.0
+        for block in self.transformer.h:
+            a = block.attn
+            for t in [a.W_phase_q, a.W_phase_k, a.W_range_k, a.W_range_v,
+                      a.W_gate_k.weight, a.W_gate_v.weight]:
+                err = max(err, float(t.detach().abs().max()))
+        return err
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -332,6 +354,9 @@ class GPT(nn.Module):
 
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+        elif isinstance(module, RMSNorm):
+            nn.init.ones_(module.weight)
 
     def forward(self, idx, targets=None):
         B, T = idx.size()
