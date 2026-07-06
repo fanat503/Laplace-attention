@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite it as below."
+title: "HLA: Holographic Laplace Attention"
+abstract: >
+  Decoupling retrieval from content transmission in softmax attention via
+  identity-initialized, content-conditioned phase rotation (Q/K),
+  bidirectional Laplace gating (K/V), additive salience bias, and
+  distance-aware biasing, with a sterile bit-exact comparison harness.
+authors:
+  - family-names: "fanat503"
+    given-names: ""
+repository-code: "https://github.com/fanat503/Laplace-attention"
+license: MIT
+keywords:
+  - transformer
+  - attention mechanism
+  - language model
+  - interpretability
+version: "5.0"
+date-released: "2026-07-04"
