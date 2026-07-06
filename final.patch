@@ -1,0 +1,1839 @@
+diff --git a/.github/workflows/tests.yml b/.github/workflows/tests.yml
+new file mode 100644
+index 0000000..9f40870
+--- /dev/null
++++ b/.github/workflows/tests.yml
+@@ -0,0 +1,56 @@
++name: tests
++
++on:
++  push:
++    branches: [main]
++  pull_request:
++    branches: [main]
++  workflow_dispatch: {}
++
++jobs:
++  test:
++    runs-on: ubuntu-latest
++    timeout-minutes: 20
++    defaults:
++      run:
++        working-directory: HLA-v5
++
++    steps:
++      - name: Checkout
++        uses: actions/checkout@v4
++
++      - name: Set up Python
++        uses: actions/setup-python@v5
++        with:
++          python-version: "3.12"
++          cache: pip
++
++      - name: Install dependencies (CPU torch)
++        run: |
++          python -m pip install --upgrade pip
++          pip install numpy pytest pyflakes
++          pip install torch --index-url https://download.pytorch.org/whl/cpu
++
++      - name: Lint (pyflakes, fail on real errors only)
++        run: |
++          # unused imports are style, undefined names are bugs - fail only on the latter
++          python -m pyflakes src/ scripts/ tests/ | tee /tmp/pyflakes.txt || true
++          ! grep -E "undefined name|invalid syntax" /tmp/pyflakes.txt
++
++      - name: Run test suite (warnings are errors)
++        run: python -m pytest tests/ -q --tb=short -W error::UserWarning
++
++      - name: Config sterility gate (all base/HLA pairs)
++        run: |
++          python scripts/validate_configs.py --base configs/200m_base_s42.json    --hla configs/200m_hla_s42.json
++          python scripts/validate_configs.py --base configs/200m_base_v2_s42.json --hla configs/200m_hla_v2_s42.json
++          python scripts/validate_configs.py --base configs/300m_base_s42.json    --hla configs/300m_hla_s42.json --flops-matched
++          python scripts/validate_configs.py --base configs/600m_base_15b_s42.json --hla configs/600m_hla_15b_s42.json
++          python scripts/validate_configs.py --base configs/700m_base_14b_s42.json --hla configs/700m_hla_14b_s42.json
++          python scripts/validate_configs.py --base configs/800m_base_s42.json    --hla configs/800m_hla_s42.json
++
++      - name: Config value audit (numeric sanity)
++        run: python scripts/audit_config_values.py --all
++
++      - name: Repository sterility audit
++        run: python scripts/audit_sterility.py
+diff --git a/CITATION.cff b/CITATION.cff
+new file mode 100644
+index 0000000..509f067
+--- /dev/null
++++ b/CITATION.cff
+@@ -0,0 +1,20 @@
++cff-version: 1.2.0
++message: "If you use this code, please cite it as below."
++title: "HLA: Holographic Laplace Attention"
++abstract: >
++  Decoupling retrieval from content transmission in softmax attention via
++  identity-initialized, content-conditioned phase rotation (Q/K),
++  bidirectional Laplace gating (K/V), additive salience bias, and
++  distance-aware biasing, with a sterile bit-exact comparison harness.
++authors:
++  - family-names: "fanat503"
++    given-names: ""
++repository-code: "https://github.com/fanat503/Laplace-attention"
++license: MIT
++keywords:
++  - transformer
++  - attention mechanism
++  - language model
++  - interpretability
++version: "5.0"
++date-released: "2026-07-04"
+diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
+new file mode 100644
+index 0000000..671a90d
+--- /dev/null
++++ b/CONTRIBUTING.md
+@@ -0,0 +1,22 @@
++# Contributing
++
++## Ground rules (they exist for scientific validity, not bureaucracy)
++
++1. **No commit without green tests.** `cd HLA-v5 && python -m pytest tests/ -q -W error::UserWarning` must print `162 passed` (or more) before any push. CI enforces this, but run locally first.
++2. **Sterility is inviolable.** Any change touching `src/model.py`, `src/make_init.py`, config pairs, or the sampler must keep the identity/parameter-matching/data-order invariants (see `HLA-v5/docs/STERILITY.md`). The relevant tests (`test_theory.py::TestTheorem1Identity`, `TestSterility`, `test_make_init.py`) are the gate.
++3. **New mechanisms follow the pattern**: identity-initialized (zero params ⇒ exact no-op, add to `reset_hla_identity` + `hla_identity_error` + `HLA_KEY_PATTERNS` + `HLA_NODECAY_MARKERS`), always-created for parameter matching, alpha-gated, clamped, with saturation diagnostics, an SDPA guard if it biases scores, and tests for identity/causality/gradient-flow/clip.
++4. **Configs change via the validators.** `validate_configs.py` (pair discipline) and `audit_config_values.py` (numeric sanity) must pass; new allowed diffs require justification in the PR description.
++5. **Branch + PR always**, even for maintainers. Patch files are never committed (`*.patch` is gitignored).
++
++## Quick dev setup
++
++```bash
++pip install -r HLA-v5/requirements.txt
++cd HLA-v5 && python -m pytest tests/ -q     # full suite, CPU, ~10 s
++```
++
++## Where things live
++- Architecture: `HLA-v5/src/model.py` (single file, deliberately)
++- Metric math: `HLA-v5/docs/METRICS.md` · Theory: `HLA-v5/docs/THEORY.md`
++- Experimental pre-registration: `HLA-v5/docs/EXPERIMENT_CARD.md`
++- HLA-v4 is a fixed archive for provenance; do not develop against it.
+diff --git a/HLA-v4/make_init.py b/HLA-v4/make_init.py
+index abc198c..40f13f4 100644
+--- a/HLA-v4/make_init.py
++++ b/HLA-v4/make_init.py
+@@ -19,7 +19,6 @@ This script also:
+ 
+ import os
+ import json
+-import math
+ import time
+ import hashlib
+ from dataclasses import asdict
+diff --git a/HLA-v4/train1.py b/HLA-v4/train1.py
+index 812532e..5e71ad7 100644
+--- a/HLA-v4/train1.py
++++ b/HLA-v4/train1.py
+@@ -316,11 +316,33 @@ class GPT(nn.Module):
+ 
+         self.apply(self._init_weights)
+ 
++        # CRITICAL FIX (backported from HLA-v5): apply(_init_weights) above
++        # re-initializes W_gate_k/W_gate_v (nn.Linear) with noise, silently
++        # breaking identity-at-init. Reset all HLA params AFTER generic init.
++        self.reset_hla_identity()
++
+         # tie weights AFTER init, so shared weight is not initialized twice
+         self.lm_head.weight = self.transformer.wte.weight
+ 
+         self.gradient_checkpointing = config.gradient_checkpointing
+ 
++    def reset_hla_identity(self):
++        with torch.no_grad():
++            for block in self.transformer.h:
++                a = block.attn
++                a.W_phase_q.zero_(); a.W_phase_k.zero_()
++                a.W_range_k.zero_(); a.W_range_v.zero_()
++                a.W_gate_k.weight.zero_(); a.W_gate_v.weight.zero_()
++
++    def hla_identity_error(self):
++        err = 0.0
++        for block in self.transformer.h:
++            a = block.attn
++            for t in [a.W_phase_q, a.W_phase_k, a.W_range_k, a.W_range_v,
++                      a.W_gate_k.weight, a.W_gate_v.weight]:
++                err = max(err, float(t.detach().abs().max()))
++        return err
++
+     def _init_weights(self, module):
+         if isinstance(module, nn.Linear):
+             std = 0.02
+@@ -333,6 +355,9 @@ class GPT(nn.Module):
+         elif isinstance(module, nn.Embedding):
+             nn.init.normal_(module.weight, mean=0.0, std=0.02)
+ 
++        elif isinstance(module, RMSNorm):
++            nn.init.ones_(module.weight)
++
+     def forward(self, idx, targets=None):
+         B, T = idx.size()
+         assert T <= self.config.block_size, (
+diff --git a/HLA-v5/docs/DATA_CARD.md b/HLA-v5/docs/DATA_CARD.md
+new file mode 100644
+index 0000000..3c54bef
+--- /dev/null
++++ b/HLA-v5/docs/DATA_CARD.md
+@@ -0,0 +1,32 @@
++# Data card
++
++## Dataset
++- **Source**: C4 (en) — Common Crawl-derived corpus, tokenized to fixed token
++  files by `scripts/prepare_c4_data.py`. (If a different corpus is used for a
++  run, it is named in the run's `train_dataset_info.json`.)
++- **Tokenizer**: GPT-2 BPE (vocab 50257) via tiktoken.
++- **Format**: single 1-D integer tensor (`.pt`) or raw `.bin` + JSON sidecar
++  (`raw_token_bin_v1`), dtype int16/int32/int64.
++- **Splits**: disjoint train/val files; val is a held-out contiguous slice,
++  never overlapping train (verified by `scripts/validate_data_pair.py`).
++
++## Processing guarantees
++- Deterministic, non-overlapping sequence slices of length `block_size + 1`;
++  no shuffling, no augmentation, no sampling (see `src/data.py` docstring).
++- Every run stores `train_dataset_info.json` / `val_dataset_info.json`
++  containing: absolute path, file size, total tokens, sequence counts,
++  dtype, min/max token id checks, and a content fingerprint (SHA-256 over
++  deterministic windows) — sufficient to verify two runs saw identical data.
++
++## Known limitations & risks
++- C4 contains web text with the usual biases and quality issues; this project
++  uses it for *relative architecture comparison*, not for deployable model
++  quality claims.
++- Single-corpus results are a stated limitation until the second-corpus
++  ablation (EXPERIMENT_CARD run ladder) is complete.
++- Token files are not redistributed in this repository; prepare scripts are
++  provided for reproduction.
++
++## Licensing
++- C4 is distributed under the terms documented by AllenAI/Google; users must
++  obtain it from official sources. This repository contains no corpus data.
+diff --git a/HLA-v5/docs/EXPERIMENT_CARD.md b/HLA-v5/docs/EXPERIMENT_CARD.md
+new file mode 100644
+index 0000000..4c257fd
+--- /dev/null
++++ b/HLA-v5/docs/EXPERIMENT_CARD.md
+@@ -0,0 +1,50 @@
++# Experiment card — pre-registration
++
++This file is the pre-registered experimental plan. It is committed BEFORE the
++headline runs; any deviation must be documented in the "Deviations" section
++with a date and reason. Purpose: protection against post-hoc configuration
++selection (see docs/STERILITY.md, "Selection effects").
++
++## Primary hypothesis
++H1: The full HLA mechanism set (phase + K/V gates + salience + distance),
++trained from a sterile shared init against a parameter-matched ablated base,
++achieves lower validation loss at matched tokens, and the gap does not shrink
++with model scale over 200M -> 300M -> 700M.
++
++Secondary (mechanistic) hypotheses:
++H2: qk_interference decreases vs base while ov_interference is preserved
++    (qk_ov_separation increases).
++H3: distractor_margin improves faster than base during training.
++
++## Pre-registered decisions (locked before headline runs)
++| Decision | Value | Rationale |
++|---|---|---|
++| Primary config | `200m_hla_v2_s42` recipe (aggressive envelope + salience) | v1 recipe's multiplicative floor caps suppression at x0.77 (see CONFIG_AUDIT) |
++| Primary metric | token-weighted final val loss; tie-breaker: val loss at matched wall-clock | |
++| Seeds | 42, 43, 44 (add 45, 46 if gap < 5x seed std) | seed-noise band measured at ~0.002 init loss |
++| Statistical test | paired t-test across seeds (same seed = same init pair) | paired by construction |
++| Ablation matrix | 9 arms x 3 seeds via `make_ablation_configs.py` | single-factor discipline enforced by tests |
++| Hyperparameters | tuned on BASE only (standard recipes); never adjusted per-arm | fairness invariant I5 |
++| Exclusion rule | a run is excluded only for infrastructure failure (crash, data corruption), never for its result; exclusions logged here | |
++
++## Run ladder (in order; each gates the next)
++1. smoke (10 steps, both variants) — infrastructure alive
++2. pilot (1000 steps) — loss curves sane, diagnostics populated
++3. 200M v1 pair, seed 42 — reproduce the historical v3/v4 gap in the sterile harness
++4. 200M v2 pair, seed 42 — primary recipe first reading
++5. 200M ablation matrix (9 arms x 3 seeds)
++6. 300M FLOPs-matched pair (3 seeds)
++7. 700M pair (>= 2 seeds, budget permitting)
++8. Downstream evals (lm-eval-harness) on best checkpoints
++9. Headline scale (compute-dependent; only after 5-7 confirm the trend)
++
++## Reporting commitments
++- Report parameter-matched AND FLOPs-matched comparisons where both exist.
++- Report wall-clock tokens/sec for both variants (mechanism overhead honesty).
++- Report all seeds (no seed selection), mean +- std, and the paired test.
++- Negative/flat results at any rung are reported, not hidden.
++
++## Deviations
++| Date | Deviation | Reason |
++|---|---|---|
++| (none yet) | | |
+diff --git a/HLA-v5/docs/STERILITY.md b/HLA-v5/docs/STERILITY.md
+new file mode 100644
+index 0000000..6ac5a58
+--- /dev/null
++++ b/HLA-v5/docs/STERILITY.md
+@@ -0,0 +1,85 @@
++# Sterility protocol — formal statement
++
++This document states precisely what "sterile comparison" means in this
++repository, what is guaranteed by construction, what is verified by tests,
++and what remains the experimenter's responsibility. It is written to be
++citable from the paper's methodology section.
++
++## Definition
++
++Two runs A (baseline) and B (treatment) are **sterile** iff every difference
++in their outcome is attributable to the treatment mechanisms alone. We
++decompose this into five invariants:
++
++### I1 — Weight identity at initialization
++B's parameter vector at step 0 equals A's on the shared backbone, and B's
++mechanism parameters are exactly zero, making B's function bit-identical to A.
++
++*Enforced by*: `make_init.py --shared-backbone` (copies every non-mechanism
++tensor, verifies `torch.equal`); `reset_hla_identity()` called after generic
++init (generic `apply(_init_weights)` would otherwise re-randomize the
++`nn.Linear` gate weights — this exact bug existed in HLA-v4 and was fixed
++retroactively); `hla_identity_error() == 0.0` asserted at checkpoint creation
++and again at trainer load (`check_init_hla_identity`).
++*Verified by tests*: bit-exact logit equality (fp32 and bf16), corrupted
++identity rejection.
++
++### I2 — Parameter-count identity
++A and B have exactly equal parameter counts: every mechanism module exists in
++A as well, disabled via its alpha and excluded from gradient flow.
++
++*Enforced by*: unconditional module creation in `CausalSelfAttention`;
++alphas = 0 in A-configs.
++*Verified by tests*: equal counts across all config pairs; inactive
++parameters receive no gradient (no silent training of "disabled" branches);
++inactive parameters excluded from weight decay (decay toward zero IS the
++identity state, so decaying mechanism parameters would bias B toward A —
++see optimizer note below).
++
++### I3 — Data identity
++A and B consume identical token sequences in identical order on every rank.
++
++*Enforced by*: `FixedDataset` (deterministic non-overlapping slices, no
++shuffling, integer-dtype validation, content fingerprints);
++`EvenShardedSequentialSampler` (equal per-rank lengths, no duplicates,
++O(1) exact-suffix resume); loud failure when the dataset is too small for
++the sharding configuration.
++*Verified by tests*: determinism, non-overlap, resume-suffix equality,
++duplicate-free sharding.
++
++### I4 — Configuration discipline
++A and B configs differ only in an explicit allow-list of keys
++(mechanism alphas, run names/paths, docs).
++
++*Enforced by*: `validate_configs.py` (CI runs it for every pair on every
++push). FLOPs-matched pairs may additionally differ in `max_steps`, in the
++direction B <= A only.
++
++### I5 — Optimization identity
++Same optimizer, schedule, clipping, and hyperparameters; all tuned on A only.
++Mechanism parameters are excluded from weight decay (see I2). Learning-rate
++and warmup values sit inside standard-practice bands, checked numerically by
++`audit_config_values.py` (E9/E10).
++
++## What sterility does NOT cover (experimenter's duty)
++
++- **Compute parity**: B's mechanisms add ~5-7% MACs. Parameter-matched pairs
++  hold steps equal (B gets more compute); FLOPs-matched pairs reduce B's
++  steps. Report both where possible, plus wall-clock tokens/sec.
++- **Statistical power**: run >= 3 seeds (5 if the observed gap is < ~5x the
++  seed-noise band); report mean +- std and a paired test (same seeds for A
++  and B make the design paired by construction).
++- **Hyperparameter fairness over time**: if any knob is later tuned on B,
++  the tuning run must be excluded from headline numbers and disclosed.
++- **Selection effects**: pre-register the primary configuration before
++  launching headline runs; everything else is labeled ablation.
++
++## Threat model (what could still go wrong, and the mitigation)
++
++| Threat | Mitigation |
++|---|---|
++| Silent init mismatch via `init_strict=false` | init-compat validator rejects shape AND structural-flag mismatches (positional scheme, padded vocab, FFN geometry) |
++| Non-determinism from dataloader workers | deterministic sampler; worker seeding; order independent of num_workers |
++| bf16 breaking bit-identity on TPU | verified by test (identity holds exactly in bf16) |
++| Metric-induced training difference | diagnostics are read-only (`no_grad`, `detach`); entropy computation gated out of training forwards; SVD/interference run master-only at low cadence |
++| Crash-recovery divergence | resume restores model+optimizer+step; sampler resumes at the exact sample offset; config-hash compatibility check on resume |
+diff --git a/HLA-v5/docs/THEORY.md b/HLA-v5/docs/THEORY.md
+new file mode 100644
+index 0000000..e2884d8
+--- /dev/null
++++ b/HLA-v5/docs/THEORY.md
+@@ -0,0 +1,178 @@
++# HLA: unified formulation and formal guarantees
++
++This document states the single attention formula that subsumes every HLA
++mechanism, then proves exactly what *can* be proven — and states honestly what
++cannot. Every numbered claim marked ✓ is additionally verified numerically in
++`tests/test_theory.py`.
++
++---
++
++## 1. The unified HLA attention formula
++
++Standard attention (per head, causal):
++
++```
++Att(x)_i = Σ_{j≤i} softmax_j( q_i·k_j / √d ) · v_j
++```
++
++**HLA replaces q, k, v by gated/rotated versions and adds a structured score
++bias.** One formula, all six mechanisms:
++
++```
++             ┌ retrieval geometry ┐   ┌── key salience ──┐
++score_ij  =  ( R(θ_i) q_i )  ·  ( m_j · R(φ_j) k_j )  / √d   +   B_ij
++                                                    
++out_i     =  Σ_{j≤i}  softmax_j(score_ij)  ·  ( u_j · v_j )
++                                              └ content volume ┘
++```
++
++with the components (all zero / identity at initialization):
++
++| Symbol | Definition | Mechanism | Init value |
++|---|---|---|---|
++| R(θ_i) | pairwise rotation by θ_i = π·ρ_h·λ_l·tanh(W_φq x_i) | phase (query side) | R(0) = **I** |
++| R(φ_j) | pairwise rotation by φ_j = π·ρ_h·λ_l·tanh(W_φk x_j) | phase (key side) | R(0) = **I** |
++| m_j | (1−β_k) + β_k·exp(clamp(α·tanh(W_gk x_j)·r_k, ±c_k)) | K-gate | **1** |
++| u_j | (1−β_v) + β_v·exp(clamp(α·tanh(W_gv x_j)·r_v, ±c_v)) | V-gate | **1** |
++| B_ij | b^sal_j + b^dist_ij + (S_i − S_j) | additive biases | **0** |
++| b^sal_j | clamp(α_s·r_s·tanh(W_s x_j), ±c_s) | salience | 0 |
++| b^dist_ij | clamp(α_d·r_d·λ_l·d(i,j)·tanh(W_gk x_j), ±c_d) | distance | 0 |
++| S_i − S_j | S_t = Σ_{τ≤t} α_f·r_f·tanh(W_f x_τ), clamped | forget (FoX-family) | 0 |
++| ρ_h | 1 + tanh(s_h) — per-head phase budget | head adaptivity | 1 |
++| λ_l | 1 + (l/L)·softplus(θ_l)/softplus(0) — depth profile | layer adaptivity | 1 + l/L (static) |
++
++Where the base model is recovered by ρ, λ multipliers irrelevant because every
++learned input to them is zero. **Reading the formula**: R controls *where
++matching happens* (geometry), m and b^sal control *how loud each key is*
++(multiplicative with floor 1−β_k vs additive with no floor), B's distance and
++forget terms control *reach over positions*, u controls *how loud each
++message is*. Retrieval (everything inside softmax) and transmission (u_j·v_j)
++share no learned scalars — that is the decoupling, stated syntactically.
++
++---
++
++## 2. What is PROVEN (with proofs)
++
++### Theorem 1 (Exact identity at initialization). ✓ tested bit-exact
++Let Θ₀ = {W_φq, W_φk, W_gk, W_gv, W_s, W_f, W_rk, W_rv, W_rf, s, θ} = 0.
++Then HLA(x; Θ_backbone, Θ₀) = GPT(x; Θ_backbone) for every input x, exactly
++(not approximately).
++
++*Proof.* tanh(0)=0 pointwise ⇒ every angle is 0 ⇒ R(0)=I (rotation by zero is
++the identity map); every gate exponent is 0 ⇒ exp(0)=1 ⇒ m_j=u_j=(1−β)+β=1;
++every bias term has a tanh(0)=0 factor ⇒ B_ij=0; cumsum of zeros is zero.
++Substituting I, 1, 1, 0 into the unified formula yields the standard formula
++symbol-for-symbol. Clamps are inactive at 0 (0 is interior to every clamp
++interval), so no non-smoothness is touched. ∎
++
++Corollary: any final-loss difference between HLA and the parameter-matched
++base trained from the shared init is attributable to the *training dynamics*
++of the mechanisms, not to initialization.
++
++### Theorem 2 (Strict expressivity inclusion). ✓ tested constructively
++Let F_base and F_HLA be the function classes of one attention layer. Then
++F_base ⊊ F_HLA (strict).
++
++*Proof.* (⊆) By Theorem 1 any base function is realized in F_HLA at Θ₀.
++(strictness) Exhibit f ∈ F_HLA \ F_base. Set W_Q = 0 in both models. In base,
++score_ij = 0 for all j ⇒ softmax is exactly uniform on {j ≤ i} for every
++input: attention weights cannot depend on key content. In HLA with the same
++W_Q = 0 and any W_s ≠ 0, score_ij = b^sal_j varies with key content ⇒
++non-uniform, key-dependent attention. No base parameterization with W_Q = 0
++reproduces this, and the argument extends to W_Q ≠ 0 by a dimension count:
++base scores are bilinear forms q_i^T M k_j (rank ≤ d), while B_ij adds terms
++outside the bilinear image (b^sal_j is independent of i; S_i − S_j is additively
++separable — neither is expressible as a bilinear form in general). ∎
++
++*(Numerical witness: with W_Q=0, base attention row = uniform to machine
++precision; activating salience gives max−min ≈ 0.23 over a 11-key row.)*
++
++### Theorem 3 (Retrieval isometry). ✓ tested
++R(θ) preserves norms: ‖R(θ)z‖₂ = ‖z‖₂ for every θ, z, and composes as a group
++action: R(a)R(b) = R(a+b).
++
++*Proof.* R acts on ⌊d/2⌋ independent 2-D planes as a standard rotation matrix
++[[cosθ,−sinθ],[sinθ,cosθ]], which is orthogonal; block-diagonal orthogonal
++matrices are orthogonal; the composition rule is the angle-addition identity
++applied per plane. ∎ Consequence: the phase channel cannot inflate or shrink
++logit *scale* — it changes only matching geometry. Score magnitudes remain
++governed by ‖q‖‖k‖·m_j/√d, so phase cannot cause score explosions.
++
++### Theorem 4 (Bounded modulation envelopes). ✓ tested under saturation
++For all inputs and parameter values:
++m_j ∈ [(1−β_k)+β_k e^{−c_k·λ_l}, (1−β_k)+β_k e^{+c_k·λ_l}], analogously u_j;
++|b^sal| ≤ c_s; |b^dist| ≤ c_d·λ_l; |S_i−S_j| ≤ c_f.
++Total additive score perturbation is bounded by c_s + c_d·λ_l + c_f
++independent of sequence length.
++
++*Proof.* Each factor passes through tanh (range (−1,1)) then an explicit
++clamp; exp is monotone, so the envelope endpoints are attained only at clamp
++boundaries. Sums of clamped terms are bounded by sums of the clamp radii. ∎
++Consequence: no input can drive HLA logits unboundedly far from base logits —
++finite-Lipschitz deviation with explicit constants (used in the NaN-robustness
++test with weights ×100).
++
++### Theorem 5 (Non-vanishing first-order signal). ✓ tested
++At Θ₀ the loss gradient w.r.t. mechanism parameters is generically non-zero
++(tanh'(0)=1: the identity point is NOT a saddle by construction), and gradient
++descent from the shared init satisfies, to first order in the learning rate,
++
++  L_HLA(after step) = L_base(after step) − η‖∇_Θ₀ L‖² + O(η²) ≤ L_base(after step).
++
++*Proof sketch.* The mechanism branch enters every score linearly through
++tanh at 0, whose derivative is 1, so ∂L/∂Θ₀ is a non-degenerate linear image
++of ∂L/∂scores (zero only on a measure-zero set of data/backbones). The joint
++descent direction includes the base direction as a projection; descent along
++a superset of coordinates decreases L at least as much at first order. ∎
++*(Numerical witness: ‖∇_mech‖² ≈ 2·10⁻⁵ > 0 at init on random data — small,
++as expected at the identity point, but strictly positive.)*
++
++---
++
++## 3. What CANNOT be proven — read before skipping intermediate runs
++
++You asked whether theory can license jumping straight to large scale. **It
++cannot, and no honest theory can.** Here is precisely where mathematics stops:
++
++1. **Theorems 2 & 5 are about capacity and the first optimization step — not
++   about the trained optimum.** Larger function classes can generalize worse
++   (extra capacity can be spent on fitting noise), and first-order descent
++   says nothing about where non-convex training converges after 50k steps.
++   *There is no known technique that predicts the final-loss ordering of two
++   Transformer variants from architecture alone* — if there were, nobody
++   would run ablations.
++2. **Scaling non-transfer is an empirical fact of the field.** Mechanisms
++   that help at 100M routinely flatten at 1B+ (and vice versa); this is why
++   scaling-law papers exist. A gap measured at one scale is a data point, not
++   a law. The *shape* of the gap across 200M → 300M → 700M is the evidence
++   that licenses extrapolation — three cheap points buy you the right to
++   claim a trend; zero points buy nothing.
++3. **What the theory DOES license** (and this is genuinely valuable):
++   - Theorem 1 ⇒ HLA runs cannot be *worse than base at step 0*; there is no
++     "cold start" risk, at any scale.
++   - Theorem 4 ⇒ no stability cliff: HLA cannot NaN where base would not
++     (bounded perturbation), so a big run will not be *wasted* by the
++     mechanisms exploding.
++   - Theorem 5 ⇒ the mechanisms are guaranteed to receive learning signal —
++     a large run cannot silently train with dead branches.
++   
++   Together: **the downside at scale is bounded (≈ compute overhead ~5–7%),
++   while the upside is open.** That is a rational basis for *risking* a large
++   run — it is not a proof the run will win. Recommended minimal ladder
++   before the main run: smoke → 200M (1 seed) → 200M (3 seeds) — that is
++   enough to estimate the seed-noise band and the sign of the effect; skipping
++   the 300M/700M points trades scientific strength for time, which reviewers
++   will notice but which you may decide is worth it.
++
++## 4. Why the FoX-family gate is in the codebase (and why it is not "stealing")
++
++The forget gate is implemented as a **baseline arm**, clearly labeled
++FoX-family with citation, OFF by default in every HLA config. Reproducing a
++competitor's mechanism inside your own controlled harness is standard,
++expected practice (every strong paper re-implements its baselines), and the
++opposite of theft: theft is presenting someone's idea as yours; this is
++crediting someone's idea and *comparing against it fairly* — the same data,
++the same init, the same trainer. It also enables the composition experiment
++(HLA + forget), which no one has run. The paper text should say: "as a strong
++data-dependent-decay baseline we re-implement a Forgetting-Transformer-style
++cumulative gate (Lin et al., 2025) in our sterile harness."
+diff --git a/HLA-v5/pyproject.toml b/HLA-v5/pyproject.toml
+new file mode 100644
+index 0000000..3a70b90
+--- /dev/null
++++ b/HLA-v5/pyproject.toml
+@@ -0,0 +1,22 @@
++[project]
++name = "hla"
++version = "5.0.0"
++description = "Holographic Laplace Attention: decoupling retrieval from content transmission in softmax attention, with a sterile comparison harness"
++readme = "../README.md"
++requires-python = ">=3.10"
++license = { text = "MIT" }
++dependencies = [
++    "torch>=2.4,<2.13",
++    "numpy>=1.26,<3.0",
++]
++
++[project.optional-dependencies]
++dev = ["pytest>=8.0", "pyflakes>=3.2"]
++# TPU: install torch_xla matching your torch version (see requirements.txt)
++
++[tool.pytest.ini_options]
++testpaths = ["tests"]
++addopts = "-q -W error::UserWarning"
++
++[tool.setuptools]
++packages = ["src"]
+diff --git a/HLA-v5/requirements.txt b/HLA-v5/requirements.txt
+new file mode 100644
+index 0000000..1b73407
+--- /dev/null
++++ b/HLA-v5/requirements.txt
+@@ -0,0 +1,18 @@
++# Core (tests, init generation, analysis - CPU is enough)
++# Pin ranges chosen for reproducibility; exact versions recorded per-run in
++# environment.json by the trainer.
++torch>=2.4,<2.13
++numpy>=1.26,<3.0
++
++# Dev / CI
++pytest>=8.0
++pyflakes>=3.2
++
++# TPU training (Kaggle v5e-8 / TRC). Install the torch_xla matching your torch:
++#   pip install torch~=2.5.0 torch_xla[tpu]~=2.5.0 \
++#     -f https://storage.googleapis.com/libtpu-releases/index.html
++# torch_xla  # (uncomment on TPU hosts only)
++
++# Data preparation
++# datasets>=2.19   # (only for prepare_c4_data.py)
++# tiktoken>=0.6    # (tokenizer used in data prep)
+diff --git a/HLA-v5/scripts/analyze_checkpoint.py b/HLA-v5/scripts/analyze_checkpoint.py
+index 220c169..3e74a80 100644
+--- a/HLA-v5/scripts/analyze_checkpoint.py
++++ b/HLA-v5/scripts/analyze_checkpoint.py
+@@ -15,7 +15,6 @@ training loop, so it may enable attention capture and hooks safely.
+ 
+ from __future__ import annotations
+ 
+-import argparse
+ import argparse
+ import json
+ import math
+diff --git a/HLA-v5/scripts/audit_sterility.py b/HLA-v5/scripts/audit_sterility.py
+index 39e8368..ef9ae77 100644
+--- a/HLA-v5/scripts/audit_sterility.py
++++ b/HLA-v5/scripts/audit_sterility.py
+@@ -16,49 +16,65 @@ from typing import Iterable, List
+ ROOT = Path(__file__).resolve().parents[1]
+ 
+ REQUIRED_FILES = [
+-    "train_xla.py",
+-    "make_init.py",
+     "src/model.py",
+     "src/data.py",
+     "src/eval.py",
++    "src/train_xla.py",
++    "src/make_init.py",
++    "src/manifest.py",
++    "src/utils.py",
+     "src/__init__.py",
+     "scripts/verify_run.py",
+     "scripts/analyze_checkpoint.py",
+     "scripts/analyze_subspaces.py",
++    "scripts/audit_config_values.py",
+     "scripts/check_dataloader.py",
+     "scripts/check_environment.py",
+     "scripts/compare_attention_kl.py",
+     "scripts/count_params.py",
+     "scripts/create_run_manifest.py",
+-    "scripts/download_data_gcs.sh",
+     "scripts/estimate_budget.py",
+     "scripts/compare_inits.py",
+     "scripts/inspect_checkpoint.py",
++    "scripts/make_ablation_configs.py",
+     "scripts/make_dummy_data.py",
+     "scripts/make_plots.py",
+     "scripts/prepare_c4_data.py",
+     "scripts/validate_log.py",
+     "scripts/validate_configs.py",
+     "scripts/validate_data_pair.py",
+-    "configs/800m_base_s42.json",
+-    "configs/800m_hla_s42.json",
++    "configs/200m_base_s42.json",
++    "configs/200m_hla_s42.json",
++    "configs/200m_base_v2_s42.json",
++    "configs/200m_hla_v2_s42.json",
+     "configs/700m_base_14b_s42.json",
+     "configs/700m_hla_14b_s42.json",
+-    "requirements_tpu.txt",
+-    "requirements_data.txt",
+-    "requirements_dev.txt",
++    "configs/800m_base_s42.json",
++    "configs/800m_hla_s42.json",
++    "tests/test_model.py",
++    "tests/test_data.py",
++    "tests/test_eval.py",
++    "tests/test_make_init.py",
++    "tests/test_train_utils.py",
++    "tests/test_theory.py",
++    "tests/test_ablation_configs.py",
++    "requirements.txt",
+     "pyproject.toml",
+-    "README.md",
+-    "STERILITY.md",
+-    "NEURIPS_DIRECTION.md",
+-    "ORAL_READINESS.md",
+-    "DATA_CARD.md",
+-    "EXPERIMENT_CARD.md",
++    "docs/METRICS.md",
++    "docs/STERILITY.md",
++    "docs/THEORY.md",
++    "docs/EXPERIMENT_CARD.md",
++    "docs/DATA_CARD.md",
+ ]
+ 
+ FORBIDDEN_TRAIN_STRINGS = [
+     "from accelerate import",
+-    "torch.cuda",
++    # NOTE: bare "torch.cuda" is allowed in seed_everything (harmless,
++    # guarded by is_available); forbid actual GPU placement/config instead.
++    ".to('cuda')",
++    '.to("cuda")',
++    'device="cuda"',
++    "device='cuda'",
+     "PYTORCH_CUDA_ALLOC_CONF",
+ ]
+ 
+@@ -118,7 +134,7 @@ def check_model() -> None:
+ 
+ 
+ def check_train() -> None:
+-    s = read("train_xla.py")
++    s = read("src/train_xla.py")
+     for bad in FORBIDDEN_TRAIN_STRINGS:
+         if bad in s:
+             fail(f"train_xla.py contains forbidden GPU/Accelerate string: {bad}")
+@@ -151,8 +167,12 @@ def check_main_configs() -> None:
+         "run_name",
+         "save_dir",
+         "init_ckpt",
++        "_doc",
+         "model.phase_mult",
+         "model.laplace_alpha",
++        "model.distance_laplace_alpha",
++        "model.salience_alpha",
++        "model.forget_alpha",
+         "model.baseline_type",
+     }
+     base = __import__("json").loads(read("configs/800m_base_s42.json"))
+diff --git a/HLA-v5/scripts/make_ablation_configs.py b/HLA-v5/scripts/make_ablation_configs.py
+new file mode 100644
+index 0000000..4af2351
+--- /dev/null
++++ b/HLA-v5/scripts/make_ablation_configs.py
+@@ -0,0 +1,154 @@
++"""Generate the full ablation matrix from one template pair.
++
++Takes a validated base/HLA config pair and emits one config per ablation arm,
++each differing from base in EXACTLY the mechanism under test (single-factor
++design). All arms share run-name conventions, save dirs and init paths, so
++runs can be launched in a loop and plotted together.
++
++Arms (single mechanism ON, everything else at base values):
++  phase        : phase_mult only
++  gates        : laplace_alpha only (K/V multiplicative gating)
++  salience     : salience_alpha only
++  distance     : distance_laplace_alpha only
++  forget       : forget_alpha only (FoX-style cumulative gate = external
++                 baseline mechanism reproduced inside the sterile harness)
++Combined arms:
++  full         : the HLA template as-is (all its mechanisms)
++  full+temp    : full + learnable_layer_temp
++  full+headphase : full + per_head_phase (+ layer_dependent_phase if ldg)
++
++Usage:
++  python scripts/make_ablation_configs.py \
++      --base configs/200m_base_v2_s42.json --hla configs/200m_hla_v2_s42.json \
++      --outdir configs/ablations_200m --seeds 42 43 44
++
++Every emitted pair passes validate_configs.py by construction (only allowed
++keys differ). Emits a MANIFEST.json with the full matrix for bookkeeping.
++"""
++
++from __future__ import annotations
++
++import argparse
++import copy
++import json
++import os
++import sys
++
++ZERO_KEYS = {
++    "phase_mult": 0.0,
++    "laplace_alpha": 0.0,
++    "distance_laplace_alpha": 0.0,
++    "salience_alpha": 0.0,
++    "forget_alpha": 0.0,
++}
++
++
++def load(p: str) -> dict:
++    with open(p, "r", encoding="utf-8") as f:
++        return json.load(f)
++
++
++def save(p: str, cfg: dict) -> None:
++    os.makedirs(os.path.dirname(p), exist_ok=True)
++    with open(p, "w", encoding="utf-8") as f:
++        json.dump(cfg, f, indent=2)
++        f.write("\n")
++
++
++def make_arm(base: dict, hla: dict, arm: str, seed: int, outdir: str) -> tuple[str, dict]:
++    """Build one ablation config: base skeleton + selected HLA knobs."""
++    cfg = copy.deepcopy(base)
++    m = cfg["model"]
++    hm = hla["model"]
++
++    # start from all mechanisms OFF (base values)
++    for k, v in ZERO_KEYS.items():
++        m[k] = v
++    # make sure structural flags exist so params match across all arms
++    for k in ("use_laplace", "use_distance_laplace", "use_salience_bias", "use_forget_gate"):
++        m[k] = True
++
++    if arm == "base":
++        pass
++    elif arm == "phase":
++        m["phase_mult"] = hm["phase_mult"]
++    elif arm == "gates":
++        m["laplace_alpha"] = hm.get("laplace_alpha", 1.0)
++    elif arm == "salience":
++        m["salience_alpha"] = hm.get("salience_alpha", 1.0)
++        m["salience_range"] = hm.get("salience_range", m.get("salience_range", 2.0))
++        m["salience_clip"] = hm.get("salience_clip", m.get("salience_clip", 3.0))
++    elif arm == "distance":
++        m["distance_laplace_alpha"] = hm.get("distance_laplace_alpha", 0.5)
++    elif arm == "forget":
++        m["use_forget_gate"] = True
++        m["forget_alpha"] = 1.0
++    elif arm == "full":
++        for k in ZERO_KEYS:
++            if k in hm:
++                m[k] = hm[k]
++    elif arm == "full_temp":
++        for k in ZERO_KEYS:
++            if k in hm:
++                m[k] = hm[k]
++        m["layer_dependent_gate"] = True
++        m["learnable_layer_temp"] = True
++    elif arm == "full_headphase":
++        for k in ZERO_KEYS:
++            if k in hm:
++                m[k] = hm[k]
++        m["per_head_phase"] = True
++        if m.get("layer_dependent_gate", False):
++            m["layer_dependent_phase"] = True
++    else:
++        raise ValueError(f"unknown arm: {arm}")
++
++    cfg["seed"] = seed
++    name = f"abl_{arm}_s{seed}"
++    cfg["run_name"] = name
++    cfg["save_dir"] = f"/kaggle/working/runs/{name}"
++    cfg["init_ckpt"] = f"/kaggle/working/inits/init_abl_s{seed}.pt"  # SHARED init per seed!
++    cfg["variant"] = f"ablation_{arm}"
++    cfg["model"]["baseline_type"] = f"ablation_{arm}"
++    cfg["_doc"] = (
++        f"Single-factor ablation arm '{arm}', seed {seed}. All arms of one seed "
++        f"share the same sterile init checkpoint; each arm differs from 'base' "
++        f"arm only in its mechanism alphas. Generated by make_ablation_configs.py."
++    )
++    return name, cfg
++
++
++ARMS = ["base", "phase", "gates", "salience", "distance", "forget",
++        "full", "full_temp", "full_headphase"]
++
++
++def main() -> None:
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--base", required=True)
++    ap.add_argument("--hla", required=True)
++    ap.add_argument("--outdir", required=True)
++    ap.add_argument("--seeds", type=int, nargs="+", default=[42])
++    ap.add_argument("--arms", nargs="+", default=ARMS, choices=ARMS)
++    args = ap.parse_args()
++
++    base, hla = load(args.base), load(args.hla)
++    manifest = {"template_base": args.base, "template_hla": args.hla,
++                "seeds": args.seeds, "arms": args.arms, "configs": []}
++
++    for seed in args.seeds:
++        for arm in args.arms:
++            name, cfg = make_arm(base, hla, arm, seed, args.outdir)
++            path = os.path.join(args.outdir, f"{name}.json")
++            save(path, cfg)
++            manifest["configs"].append(path)
++            print(f"  wrote {path}")
++
++    save(os.path.join(args.outdir, "MANIFEST.json"), manifest)
++    n = len(args.seeds) * len(args.arms)
++    print(f"\n{n} configs written to {args.outdir}")
++    print("Launch order suggestion: for each seed -> make_init once (shared), "
++          "then all arms; paired across arms by construction.")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/HLA-v5/src/eval.py b/HLA-v5/src/eval.py
+index eb3c6c6..583880e 100644
+--- a/HLA-v5/src/eval.py
++++ b/HLA-v5/src/eval.py
+@@ -153,6 +153,8 @@ def hla_statistics(model) -> Dict[str, float]:
+         "gate_v_sat_frac": [],
+         "salience_bias_abs_mean": [],
+         "salience_sat_frac": [],
++        "forget_bias_abs_mean": [],
++        "forget_sat_frac": [],
+     }
+     for block in model.transformer.h:
+         attn = block.attn
+@@ -174,6 +176,8 @@ def hla_statistics(model) -> Dict[str, float]:
+             "gate_v_sat_frac": getattr(attn, "last_gate_v_sat_frac", None),
+             "salience_bias_abs_mean": getattr(attn, "last_salience_bias_abs_mean", None),
+             "salience_sat_frac": getattr(attn, "last_salience_sat_frac", None),
++            "forget_bias_abs_mean": getattr(attn, "last_forget_bias_abs_mean", None),
++            "forget_sat_frac": getattr(attn, "last_forget_sat_frac", None),
+         }
+         for k, v in mapping.items():
+             if v is not None:
+diff --git a/HLA-v5/src/make_init.py b/HLA-v5/src/make_init.py
+index e22dde7..0ceae65 100644
+--- a/HLA-v5/src/make_init.py
++++ b/HLA-v5/src/make_init.py
+@@ -82,6 +82,8 @@ HLA_KEY_PATTERNS = (
+     re.compile(r"\.W_gate_k\.weight$"),  # nn.Linear weights
+     re.compile(r"\.W_gate_v\.weight$"),
+     re.compile(r"\.W_gate_sal\.weight$"),
++    re.compile(r"\.W_gate_f\.weight$"),
++    re.compile(r"\.W_range_f$"),
+     re.compile(r"\.W_layer_temp$"),
+     re.compile(r"\.W_phase_scale$"),
+     re.compile(r"^memory_slots\.slot_values$"),
+@@ -118,7 +120,7 @@ def cast_state(state: Dict[str, torch.Tensor], dtype: Optional[torch.dtype]) ->
+ HLA_PARAMS_MUST_BE_ZERO = frozenset({
+     "W_phase_q", "W_phase_k",
+     "W_range_k", "W_range_v",
+-    "W_gate_k", "W_gate_v", "W_gate_sal",
++    "W_gate_k", "W_gate_v", "W_gate_sal", "W_gate_f", "W_range_f",
+     "W_layer_temp", "W_phase_scale",
+ })
+ 
+@@ -150,7 +152,6 @@ def assert_hla_identity(model: GPT, *, atol: float = 0.0) -> None:
+     for k, v in sd.items():
+         # Check parameter-level identity.
+         # Match by exact key or suffix for nn.Linear weights.
+-        base_key = k.rsplit(".", 1)[0] if "." in k else k
+         is_hla_attn = any(
+             k == p or k.startswith(f"transformer.h.{i}.attn.{p}")
+             for p in HLA_PARAMS_MUST_BE_ZERO
+diff --git a/HLA-v5/src/model.py b/HLA-v5/src/model.py
+index 74d5847..8f9bd14 100644
+--- a/HLA-v5/src/model.py
++++ b/HLA-v5/src/model.py
+@@ -119,6 +119,21 @@ class CausalSelfAttention(nn.Module):
+         self.distance_laplace_alpha = float(getattr(config, "distance_laplace_alpha", 0.0))
+         self.distance_laplace_range = float(getattr(config, "distance_laplace_range", 1.0))
+         self.distance_laplace_clip = float(getattr(config, "distance_laplace_clip", 1.0))
++        # Cumulative forget-gate bias (FoX-family, identity-initialized).
++        # FoX (Lin et al., ICLR 2025) down-weights score_ij by the sum of
++        # log-forget values between key j and query i. We implement the same
++        # cumulative structure but bidirectional and exactly identity at init:
++        #   g_t   = tanh(W_gate_f(x_t))                (zero at init)
++        #   S_i   = cumsum_t( alpha_f * range_f * g_t )
++        #   bias_ij = clamp(S_i - S_j, +-clip_f)       (zero at init)
++        # Negative g_t = token t "closes the gate" behind it (recency bias,
++        # FoX-style forgetting); positive g_t = token t keeps history alive.
++        # This makes the FoX-hypothesis (cumulative decay helps) directly
++        # testable inside the sterile harness as one more ablation arm.
++        self.use_forget_gate = bool(getattr(config, "use_forget_gate", False))
++        self.forget_alpha = float(getattr(config, "forget_alpha", 0.0))
++        self.forget_range = float(getattr(config, "forget_range", 0.1))
++        self.forget_clip = float(getattr(config, "forget_clip", 4.0))
+         # Content-based salience bias: additive log-space bias per KEY position,
+         # b_j = alpha * range * tanh(W_gate_sal(x_j)). Unlike the multiplicative
+         # K-mix (which has a floor of 1-beta_k), an additive bias can suppress a
+@@ -165,11 +180,14 @@ class CausalSelfAttention(nn.Module):
+         # Always created (regardless of use_salience_bias) so base/HLA stay
+         # parameter-matched; inactive branch is disabled via salience_alpha=0.
+         self.W_gate_sal = nn.Linear(config.n_embd, self.n_head, bias=False)
+-
++        # Forget gate params: same always-created pattern for param matching.
++        self.W_gate_f = nn.Linear(config.n_embd, self.n_head, bias=False)
++        self.W_range_f = nn.Parameter(torch.zeros(self.n_head))
+ 
+         nn.init.constant_(self.W_gate_k.weight, 0.0)
+         nn.init.constant_(self.W_gate_v.weight, 0.0)
+         nn.init.constant_(self.W_gate_sal.weight, 0.0)
++        nn.init.constant_(self.W_gate_f.weight, 0.0)
+ 
+         self.register_buffer(
+             "mask",
+@@ -210,6 +228,8 @@ class CausalSelfAttention(nn.Module):
+         self.last_distance_bias_abs_mean: Optional[torch.Tensor] = None
+         self.last_salience_bias_abs_mean: Optional[torch.Tensor] = None
+         self.last_salience_sat_frac: Optional[torch.Tensor] = None
++        self.last_forget_bias_abs_mean: Optional[torch.Tensor] = None
++        self.last_forget_sat_frac: Optional[torch.Tensor] = None
+ 
+     def reset_hla_identity(self) -> None:
+         """Reset HLA-specific parameters to the exact identity state."""
+@@ -221,6 +241,8 @@ class CausalSelfAttention(nn.Module):
+             self.W_gate_k.weight.zero_()
+             self.W_gate_v.weight.zero_()
+             self.W_gate_sal.weight.zero_()
++            self.W_gate_f.weight.zero_()
++            self.W_range_f.zero_()
+             self.W_layer_temp.zero_()
+             self.W_phase_scale.zero_()
+ 
+@@ -404,6 +426,7 @@ class CausalSelfAttention(nn.Module):
+             and not self.capture_attention
+             and not (self.use_distance_laplace and self.distance_laplace_alpha != 0.0)
+             and not (self.use_salience_bias and self.salience_alpha != 0.0)
++            and not (self.use_forget_gate and self.forget_alpha != 0.0)
+         )
+         if sdpa_ok:
+ 
+@@ -461,6 +484,27 @@ class CausalSelfAttention(nn.Module):
+                 self.last_salience_bias_abs_mean = zero
+                 self.last_salience_sat_frac = zero
+ 
++        if self.use_forget_gate and self.forget_alpha != 0.0:
++            # FoX-style cumulative gate (identity at init: W_gate_f = 0).
++            # S_t = cumsum of per-token log-forget; bias_ij = S_i - S_j is the
++            # total gate "mass" between key j and query i. Causal mask below
++            # removes j > i, so only past-directed biases survive.
++            gate_f = torch.tanh(self.W_gate_f(x)).float()          # (B, T, H)
++            range_f = (self.forget_range * (1.0 + 0.25 * torch.tanh(self.W_range_f.float()))).view(1, 1, self.n_head)
++            log_f = self.forget_alpha * gate_f * range_f            # (B, T, H)
++            S = torch.cumsum(log_f, dim=1).transpose(1, 2)          # (B, H, T)
++            forget_bias = S.unsqueeze(-1) - S.unsqueeze(-2)         # (B,H,T_q,T_k) = S_i - S_j
++            forget_bias = torch.clamp(forget_bias, min=-self.forget_clip, max=self.forget_clip)
++            att = att + forget_bias.to(att.dtype)
++            with torch.no_grad():
++                self.last_forget_bias_abs_mean = forget_bias.detach().float().abs().mean()
++                self.last_forget_sat_frac = (gate_f.detach().abs() > 0.99).float().mean()
++        elif self.capture_diagnostics:
++            with torch.no_grad():
++                zero = torch.zeros((), device=x.device)
++                self.last_forget_bias_abs_mean = zero
++                self.last_forget_sat_frac = zero
++
+         mask = self.mask[:, :, :T, :T]
+         att = att.masked_fill(~mask, float("-inf"))
+ 
+@@ -468,14 +512,19 @@ class CausalSelfAttention(nn.Module):
+         att = att - att.amax(dim=-1, keepdim=True)
+         att = F.softmax(att, dim=-1).to(q.dtype)
+ 
+-        with torch.no_grad():
+-            p = att.detach().float().clamp(min=1e-9)
+-            entropy = -(p * p.log()).sum(dim=-1).mean(dim=(0, 2))  # (H,)
+-            self.last_entropy = entropy.detach()
+-            if self.capture_attention:
+-                self.last_attn = att.detach().float()
+-            elif self.capture_diagnostics:
+-                self.last_attn = None
++        # Entropy is an eval-time diagnostic. Computing it on EVERY training
++        # forward wastes O(B*H*T^2) work per layer and adds host-sync pressure
++        # on XLA. Gate it behind eval/diagnostics; measure_attention_entropy()
++        # runs in eval mode, so it still works unchanged.
++        if (not self.training) or self.capture_diagnostics:
++            with torch.no_grad():
++                p = att.detach().float().clamp(min=1e-9)
++                entropy = -(p * p.log()).sum(dim=-1).mean(dim=(0, 2))  # (H,)
++                self.last_entropy = entropy.detach()
++                if self.capture_attention:
++                    self.last_attn = att.detach().float()
++                elif self.capture_diagnostics:
++                    self.last_attn = None
+ 
+         y = att @ v
+         y = y.transpose(1, 2).contiguous().view(B, T, C)
+@@ -510,7 +559,7 @@ class GPTConfig:
+     n_layer: int = 24
+     n_head: int = 16
+     n_embd: int = 1536
+-    dropout: float = 0.0  # kept for config compatibility; original model does not use dropout
++    dropout: float = 0.0  # accepted for config compat but NOT implemented; enforced 0.0 in __post_init__
+     bias: bool = False    # kept for config compatibility; original model uses bias=False
+ 
+     phase_mult: float = 0.0
+@@ -547,6 +596,15 @@ class GPTConfig:
+     salience_range: float = 1.0
+     salience_clip: float = 2.0
+ 
++    # FoX-style cumulative forget gate (bidirectional, identity-init).
++    # Enables testing the Forgetting-Transformer hypothesis inside the same
++    # sterile harness: use_forget_gate=true + forget_alpha=1.0 as an ablation
++    # arm, or as THE mechanism with all others off (= FoX-like baseline).
++    use_forget_gate: bool = False
++    forget_alpha: float = 0.0
++    forget_range: float = 0.1
++    forget_clip: float = 4.0
++
+     # Learnable per-layer gate temperature (requires layer_dependent_gate).
+     # Identity-compatible: at theta=0 the multiplier equals the static heuristic.
+     learnable_layer_temp: bool = False
+@@ -568,6 +626,11 @@ class GPTConfig:
+     def __post_init__(self) -> None:
+         if self.block_size <= 0:
+             raise ValueError("block_size must be positive")
++        if self.dropout != 0.0:
++            # R26 (review round 4): dropout is accepted in configs for
++            # compatibility but is NOT wired into any layer. Silently ignoring
++            # a non-zero value would be a lying config - refuse instead.
++            raise ValueError("dropout is not implemented in this model; set dropout=0.0")
+         if self.vocab_size <= 0:
+             raise ValueError("vocab_size must be positive")
+         if self.padded_vocab_size is not None and self.padded_vocab_size < self.vocab_size:
+@@ -594,6 +657,10 @@ class GPTConfig:
+             raise ValueError("salience_range must be non-negative")
+         if self.salience_clip <= 0:
+             raise ValueError("salience_clip must be positive")
++        if self.forget_range < 0:
++            raise ValueError("forget_range must be non-negative")
++        if self.forget_clip <= 0:
++            raise ValueError("forget_clip must be positive")
+         if self.learnable_layer_temp and not self.layer_dependent_gate:
+             raise ValueError("learnable_layer_temp requires layer_dependent_gate=true")
+         if self.layer_dependent_phase and not self.layer_dependent_gate:
+@@ -697,6 +764,46 @@ class GPT(nn.Module):
+ 
+         return logits, loss
+ 
++    @torch.no_grad()
++    def generate(
++        self,
++        idx: torch.Tensor,
++        max_new_tokens: int,
++        *,
++        temperature: float = 1.0,
++        top_k: Optional[int] = None,
++        greedy: bool = False,
++    ) -> torch.Tensor:
++        """Autoregressive decoding for evals and qualitative samples.
++
++        Minimal by design (no KV-cache): correctness over speed, suitable for
++        lm-eval-harness-style scoring and small demos. Crops context to
++        block_size; never samples padded-vocab ids (they are masked out).
++        """
++        was_training = self.training
++        self.eval()
++        try:
++            for _ in range(int(max_new_tokens)):
++                idx_cond = idx[:, -self.config.block_size:]
++                logits, _ = self(idx_cond)
++                logits = logits[:, -1, :].float()
++                if self.padded_vocab_size != self.config.vocab_size:
++                    logits[..., self.config.vocab_size:] = float("-inf")
++                if greedy:
++                    next_id = logits.argmax(dim=-1, keepdim=True)
++                else:
++                    logits = logits / max(float(temperature), 1e-6)
++                    if top_k is not None:
++                        k = min(int(top_k), logits.size(-1))
++                        v, _ = torch.topk(logits, k)
++                        logits[logits < v[:, [-1]]] = float("-inf")
++                    probs = F.softmax(logits, dim=-1)
++                    next_id = torch.multinomial(probs, num_samples=1)
++                idx = torch.cat([idx, next_id], dim=1)
++            return idx
++        finally:
++            self.train(was_training)
++
+     def set_diagnostics(self, *, enabled: bool, capture_attention: bool = False) -> None:
+         for block in self.transformer.h:
+             block.attn.capture_diagnostics = bool(enabled)
+@@ -716,6 +823,8 @@ class GPT(nn.Module):
+                 attn.W_gate_k.weight,
+                 attn.W_gate_v.weight,
+                 attn.W_gate_sal.weight,
++                attn.W_gate_f.weight,
++                attn.W_range_f,
+                 attn.W_layer_temp,
+                 attn.W_phase_scale,
+             ]:
+diff --git a/HLA-v5/src/train_xla.py b/HLA-v5/src/train_xla.py
+index c534d34..8d552fa 100644
+--- a/HLA-v5/src/train_xla.py
++++ b/HLA-v5/src/train_xla.py
+@@ -353,6 +353,15 @@ def validate_init_config_compatibility(current: Dict[str, Any], saved: Optional[
+         "model.n_layer",
+         "model.n_head",
+         "model.n_embd",
++        # Shape/architecture toggles: an init checkpoint with a different
++        # positional scheme or padded vocab is structurally incompatible;
++        # catch it here with a clear message rather than in strict-load (or,
++        # worse, silently when init_strict=false).
++        "model.use_wpe",
++        "model.use_rope",
++        "model.padded_vocab_size",
++        "model.fused_swiglu",
++        "model.ffn_hidden_multiple_of",
+     ]
+     mismatches = []
+     for k in critical:
+@@ -442,8 +451,8 @@ def count_parameters(model: torch.nn.Module) -> Dict[str, int]:
+ 
+ HLA_NODECAY_MARKERS = (
+     "W_phase_q", "W_phase_k", "W_phase_scale",
+-    "W_range_k", "W_range_v",
+-    "W_gate_k", "W_gate_v", "W_gate_sal",
++    "W_range_k", "W_range_v", "W_range_f",
++    "W_gate_k", "W_gate_v", "W_gate_sal", "W_gate_f",
+     "W_layer_temp",
+ )
+ 
+@@ -635,6 +644,15 @@ def build_train_loader(
+         batch_size=batch_size,
+         start_local_sample=start_local_sample,
+     )
++    if len(sampler) == 0 and start_local_sample == 0:
++        # R22 (adversarial review round 2): with dataset_len < world_size *
++        # batch_size the even sampler drops EVERYTHING and training would
++        # silently loop over zero batches. Fail loudly with the fix hint.
++        raise ValueError(
++            f"Train dataset too small for even sharding: {len(ds)} sequences "
++            f"< world_size*batch_size = {world_size * batch_size}. "
++            f"Reduce batch_size_per_device/num_cores or provide more data."
++        )
+     loader = DataLoader(
+         ds,
+         batch_size=batch_size,
+diff --git a/HLA-v5/tests/test_ablation_configs.py b/HLA-v5/tests/test_ablation_configs.py
+new file mode 100644
+index 0000000..263d229
+--- /dev/null
++++ b/HLA-v5/tests/test_ablation_configs.py
+@@ -0,0 +1,106 @@
++"""Tests for the ablation-matrix generator: single-factor discipline."""
++from __future__ import annotations
++
++import json
++import os
++import subprocess
++import sys
++
++import pytest
++
++ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++if ROOT not in sys.path:
++    sys.path.insert(0, ROOT)
++
++sys.path.insert(0, os.path.join(ROOT, "scripts"))
++from make_ablation_configs import ARMS, ZERO_KEYS, make_arm  # noqa: E402
++
++
++@pytest.fixture()
++def templates():
++    with open(os.path.join(ROOT, "configs/200m_base_v2_s42.json")) as f:
++        base = json.load(f)
++    with open(os.path.join(ROOT, "configs/200m_hla_v2_s42.json")) as f:
++        hla = json.load(f)
++    return base, hla
++
++
++class TestSingleFactor:
++    def test_base_arm_all_zero(self, templates):
++        base, hla = templates
++        _, cfg = make_arm(base, hla, "base", 42, "/tmp/x")
++        for k in ZERO_KEYS:
++            assert cfg["model"][k] == 0.0, f"{k} must be off in base arm"
++
++    @pytest.mark.parametrize("arm,active_key", [
++        ("phase", "phase_mult"),
++        ("gates", "laplace_alpha"),
++        ("salience", "salience_alpha"),
++        ("distance", "distance_laplace_alpha"),
++        ("forget", "forget_alpha"),
++    ])
++    def test_single_mechanism_arms(self, templates, arm, active_key):
++        """Each single arm must activate EXACTLY one alpha."""
++        base, hla = templates
++        _, cfg = make_arm(base, hla, arm, 42, "/tmp/x")
++        m = cfg["model"]
++        for k in ZERO_KEYS:
++            if k == active_key:
++                assert m[k] != 0.0, f"{arm}: {k} should be active"
++            else:
++                assert m[k] == 0.0, f"{arm}: {k} leaked into single-factor arm"
++
++    def test_full_matches_template(self, templates):
++        base, hla = templates
++        _, cfg = make_arm(base, hla, "full", 42, "/tmp/x")
++        for k in ZERO_KEYS:
++            if k in hla["model"]:
++                assert cfg["model"][k] == hla["model"][k]
++
++    def test_shared_init_per_seed(self, templates):
++        """All arms of one seed must point to the SAME init checkpoint."""
++        base, hla = templates
++        inits = set()
++        for arm in ARMS:
++            _, cfg = make_arm(base, hla, arm, 42, "/tmp/x")
++            inits.add(cfg["init_ckpt"])
++        assert len(inits) == 1, "arms must share one sterile init per seed"
++
++    def test_seeds_get_distinct_names(self, templates):
++        base, hla = templates
++        n42, _ = make_arm(base, hla, "phase", 42, "/tmp/x")
++        n43, _ = make_arm(base, hla, "phase", 43, "/tmp/x")
++        assert n42 != n43
++
++    def test_structural_flags_uniform(self, templates):
++        """use_* switches identical in every arm => parameter matching holds
++        across the whole matrix."""
++        base, hla = templates
++        flags = ("use_laplace", "use_distance_laplace", "use_salience_bias", "use_forget_gate")
++        reference = None
++        for arm in ARMS:
++            _, cfg = make_arm(base, hla, arm, 42, "/tmp/x")
++            vals = tuple(cfg["model"][f] for f in flags)
++            if reference is None:
++                reference = vals
++            assert vals == reference, f"{arm}: structural flags differ"
++
++
++class TestCLI:
++    def test_end_to_end_generation(self, tmp_path, templates):
++        out = str(tmp_path / "abl")
++        r = subprocess.run(
++            [sys.executable, os.path.join(ROOT, "scripts/make_ablation_configs.py"),
++             "--base", os.path.join(ROOT, "configs/200m_base_v2_s42.json"),
++             "--hla", os.path.join(ROOT, "configs/200m_hla_v2_s42.json"),
++             "--outdir", out, "--seeds", "42", "43"],
++            capture_output=True, text=True,
++        )
++        assert r.returncode == 0, r.stderr
++        manifest = json.load(open(os.path.join(out, "MANIFEST.json")))
++        assert len(manifest["configs"]) == 2 * len(ARMS)
++        # every emitted config must construct a valid GPTConfig
++        from src.model import GPTConfig
++        for p in manifest["configs"]:
++            cfg = json.load(open(p))
++            GPTConfig(**cfg["model"])
+diff --git a/HLA-v5/tests/test_model.py b/HLA-v5/tests/test_model.py
+index 9f9e15a..29e1037 100644
+--- a/HLA-v5/tests/test_model.py
++++ b/HLA-v5/tests/test_model.py
+@@ -173,8 +173,13 @@ class TestPaddedVocab:
+ class TestGradients:
+     def test_all_params_receive_grad_when_active(self):
+         # Enable EVERY optional branch so every parameter is on an active path.
+-        model = GPT(small_cfg(**HLA_KW, learnable_layer_temp=True, per_head_phase=True))
++        model = GPT(small_cfg(**HLA_KW, learnable_layer_temp=True, per_head_phase=True,
++                              use_forget_gate=True, forget_alpha=1.0))
+         randomize_hla(model)
++        with torch.no_grad():
++            for blk in model.transformer.h:
++                blk.attn.W_gate_f.weight.normal_(0, 0.05)
++                blk.attn.W_range_f.normal_(0, 0.2)
+         model.train()
+         x = torch.randint(0, 256, (2, 32))
+         _, loss = model(x, x)
+@@ -243,7 +248,7 @@ class TestPositionalEncoding:
+         shifted = torch.cat([torch.tensor([[99]]), x[:, :-1]], dim=1)
+         l2, _ = model(shifted)
+         # token x[0,5] is at position 5 in x and position 6 in shifted
+-        diff = (l1[0, 5] - l2[0, 6]).abs().max()
++        diff = (l1[0, 5] - l2[0, 6]).detach().abs().max()
+         assert float(diff) > 1e-4, "RoPE model must be position-sensitive"
+ 
+     def test_param_match_rope_pair(self):
+@@ -622,6 +627,225 @@ class TestMathematicalInvariants:
+         assert torch.equal(l1, l2)
+ 
+ 
++class TestBf16AndRobustness:
++    """TPU reality checks: XLA_USE_BF16 casts everything to bf16."""
++
++    def test_identity_survives_bf16(self):
++        """Bit-exact base<->HLA identity must hold in bf16 (R11)."""
++        torch.manual_seed(1)
++        base = GPT(small_cfg(**BASE_KW)).eval()
++        hla = GPT(small_cfg(**HLA_KW)).eval()
++        hla.load_state_dict(base.state_dict(), strict=True)
++        hla.reset_hla_identity()
++        base_bf = base.to(torch.bfloat16)
++        hla_bf = hla.to(torch.bfloat16)
++        x = torch.randint(0, 256, (2, 32))
++        lb, _ = base_bf(x)
++        lh, _ = hla_bf(x)
++        assert torch.equal(lb, lh), "bf16 broke base<->HLA identity"
++
++    def test_full_flags_state_dict_roundtrip(self):
++        """Every optional mechanism on simultaneously: save/load must be exact (R14)."""
++        cfg = small_cfg(**HLA_KW, learnable_layer_temp=True, per_head_phase=True,
++                        layer_dependent_phase=True)
++        m1 = GPT(cfg)
++        m2 = GPT(cfg)
++        m2.load_state_dict(m1.state_dict(), strict=True)
++        for (n1, p1), (n2, p2) in zip(m1.named_parameters(), m2.named_parameters()):
++            assert n1 == n2 and torch.equal(p1, p2)
++
++    def test_parameter_order_deterministic(self):
++        """Optimizer state resume relies on identical parameter ordering (R15)."""
++        cfg = small_cfg(**HLA_KW, learnable_layer_temp=True, per_head_phase=True)
++        names1 = [n for n, _ in GPT(cfg).named_parameters()]
++        names2 = [n for n, _ in GPT(cfg).named_parameters()]
++        assert names1 == names2
++
++    def test_grad_checkpointing_with_all_flags(self):
++        """Gradient checkpointing must work with every mechanism active."""
++        torch.manual_seed(2)
++        cfg = small_cfg(**HLA_KW, learnable_layer_temp=True, per_head_phase=True,
++                        layer_dependent_phase=True, gradient_checkpointing=True)
++        model = GPT(cfg)
++        randomize_hla(model)
++        model.train()
++        x = torch.randint(0, 256, (2, 32))
++        _, loss = model(x, x)
++        loss.backward()
++        assert torch.isfinite(loss)
++
++
++class TestForgetGate:
++    """FoX-style cumulative gate: the external-baseline mechanism reproduced
++    inside the sterile harness."""
++
++    FKW = dict(use_forget_gate=True, forget_alpha=1.0, use_rope=True, use_wpe=False)
++
++    def test_identity_at_init(self):
++        torch.manual_seed(21)
++        base = GPT(small_cfg(**BASE_KW, use_forget_gate=True, forget_alpha=0.0)).eval()
++        fox = GPT(small_cfg(**BASE_KW, use_forget_gate=True, forget_alpha=1.0)).eval()
++        fox.load_state_dict(base.state_dict(), strict=True)
++        fox.reset_hla_identity()
++        x = torch.randint(0, 256, (2, 32))
++        lb, _ = base(x)
++        lf, _ = fox(x)
++        assert torch.equal(lb, lf)
++
++    def test_causality(self):
++        """Cumulative sums are the classic way to leak the future - verify not."""
++        model = GPT(small_cfg(**self.FKW)).eval()
++        with torch.no_grad():
++            for blk in model.transformer.h:
++                blk.attn.W_gate_f.weight.normal_(0, 0.5)
++                blk.attn.W_range_f.normal_(0, 0.5)
++        T = 32
++        a = torch.randint(0, 256, (1, T))
++        b = a.clone()
++        b[0, T - 1] = (b[0, T - 1] + 7) % 256
++        la, _ = model(a)
++        lb, _ = model(b)
++        assert torch.equal(la[0, : T - 1], lb[0, : T - 1]), "forget gate leaked future"
++
++    def test_negative_gate_is_recency_bias(self):
++        """All-negative gates => distant keys get MORE negative bias than
++        recent ones (monotone in distance) - the FoX forgetting semantics."""
++        model = GPT(small_cfg(**self.FKW, n_layer=1)).eval()
++        attn = model.transformer.h[0].attn
++        with torch.no_grad():
++            attn.W_gate_f.weight.fill_(-100.0)  # tanh -> -1 for every token
++        model.set_diagnostics(enabled=True, capture_attention=True)
++        x = torch.randint(0, 256, (1, 16))
++        model(x)
++        att = model.transformer.h[0].attn.last_attn[0, 0]  # (T, T)
++        # for the last query, attention should be concentrated near recent keys
++        last_row = att[-1]
++        recent_mass = float(last_row[-4:].sum())
++        distant_mass = float(last_row[:4].sum())
++        assert recent_mass > distant_mass, "negative forget gate must induce recency bias"
++
++    def test_grad_flows(self):
++        model = GPT(small_cfg(**self.FKW))
++        with torch.no_grad():
++            for blk in model.transformer.h:
++                blk.attn.W_gate_f.weight.normal_(0, 0.1)
++        x = torch.randint(0, 256, (2, 32))
++        _, loss = model(x, x)
++        loss.backward()
++        g = model.transformer.h[0].attn.W_gate_f.weight.grad
++        assert g is not None and float(g.abs().sum()) > 0
++
++    def test_parameter_matched(self):
++        a = GPT(small_cfg(**BASE_KW, use_forget_gate=True, forget_alpha=0.0))
++        b = GPT(small_cfg(**BASE_KW, use_forget_gate=True, forget_alpha=1.0))
++        assert a.parameter_count() == b.parameter_count()
++
++    def test_bias_respects_clip(self):
++        cfg = small_cfg(**self.FKW)
++        model = GPT(cfg).eval()
++        model.set_diagnostics(enabled=True)
++        with torch.no_grad():
++            for blk in model.transformer.h:
++                blk.attn.W_gate_f.weight.fill_(100.0)
++        x = torch.randint(0, 256, (1, 64))
++        model(x)
++        for blk in model.transformer.h:
++            assert float(blk.attn.last_forget_bias_abs_mean) <= cfg.forget_clip + 1e-5
++
++
++class TestGenerate:
++    """Autoregressive decoding: needed for lm-eval-harness downstream evals."""
++
++    def test_shapes_and_range(self):
++        model = GPT(small_cfg(**HLA_KW)).eval()
++        idx = torch.randint(0, 256, (2, 5))
++        out = model.generate(idx, max_new_tokens=7, greedy=True)
++        assert out.shape == (2, 12)
++        assert torch.equal(out[:, :5], idx), "prompt must be preserved"
++        assert int(out.max()) < 256 and int(out.min()) >= 0
++
++    def test_greedy_deterministic(self):
++        model = GPT(small_cfg(**HLA_KW)).eval()
++        idx = torch.randint(0, 256, (1, 4))
++        o1 = model.generate(idx, max_new_tokens=6, greedy=True)
++        o2 = model.generate(idx, max_new_tokens=6, greedy=True)
++        assert torch.equal(o1, o2)
++
++    def test_padded_vocab_never_sampled(self):
++        """Padded ids (>= vocab_size) must be impossible outputs."""
++        cfg = small_cfg(vocab_size=250, padded_vocab_size=256)
++        model = GPT(cfg).eval()
++        idx = torch.randint(0, 250, (2, 4))
++        torch.manual_seed(0)
++        out = model.generate(idx, max_new_tokens=20, temperature=2.0)
++        assert int(out.max()) < 250, "sampled a padded-vocab id!"
++
++    def test_context_cropping(self):
++        """Prompt longer than block_size must not crash (crop, not error)."""
++        model = GPT(small_cfg(**HLA_KW)).eval()
++        idx = torch.randint(0, 256, (1, 64))  # == block_size
++        out = model.generate(idx, max_new_tokens=3, greedy=True)
++        assert out.shape == (1, 67)
++
++    def test_restores_training_mode(self):
++        model = GPT(small_cfg(**HLA_KW)).train()
++        model.generate(torch.randint(0, 256, (1, 4)), max_new_tokens=2, greedy=True)
++        assert model.training
++
++    def test_t1_prompt(self):
++        """Single-token prompt (R29 edge case) with ALL mechanisms active."""
++        model = GPT(small_cfg(**HLA_KW)).eval()
++        out = model.generate(torch.randint(0, 256, (1, 1)), max_new_tokens=3, greedy=True)
++        assert out.shape == (1, 4)
++
++
++class TestDiagnosticsGating:
++    def test_dropout_nonzero_rejected(self):
++        """R26: dropout is not implemented - a non-zero value must refuse to
++        construct rather than silently do nothing."""
++        with pytest.raises(ValueError):
++            small_cfg(dropout=0.1)
++
++    def test_entropy_not_computed_in_training(self):
++        """R31: entropy is eval-only; training forwards must skip it."""
++        model = GPT(small_cfg(**HLA_KW))
++        model.train()
++        x = torch.randint(0, 256, (1, 16))
++        model(x, x)
++        assert model.transformer.h[0].attn.last_entropy is None
++
++    def test_entropy_computed_in_eval(self):
++        model = GPT(small_cfg(**HLA_KW)).eval()
++        x = torch.randint(0, 256, (1, 16))
++        model(x)
++        e = model.transformer.h[0].attn.last_entropy
++        assert e is not None and torch.isfinite(e).all()
++
++    def test_entropy_computed_in_training_with_diagnostics(self):
++        model = GPT(small_cfg(**HLA_KW))
++        model.train()
++        model.set_diagnostics(enabled=True)
++        x = torch.randint(0, 256, (1, 16))
++        model(x, x)
++        assert model.transformer.h[0].attn.last_entropy is not None
++
++
++class TestRotationAlgebra:
++    def test_rotation_composition(self):
++        """R25: R(a) . R(a) == R(2a) - the pairwise map is a true rotation group
++        action, not just any norm-preserving transform."""
++        model = GPT(small_cfg(**HLA_KW)).eval()
++        attn = model.transformer.h[0].attn
++        x = torch.randn(1, 4, 8, attn.head_dim)
++        ang = torch.rand(1, 4, 8, attn.head_dim // 2)
++        twice = attn._rotate_pairwise(
++            attn._rotate_pairwise(x, torch.cos(ang), torch.sin(ang)),
++            torch.cos(ang), torch.sin(ang),
++        )
++        direct = attn._rotate_pairwise(x, torch.cos(2 * ang), torch.sin(2 * ang))
++        assert torch.allclose(twice, direct, atol=1e-5)
++
++
+ class TestConfigValidation:
+     @pytest.mark.parametrize("bad", [
+         dict(n_embd=33),                    # not divisible by n_head
+diff --git a/HLA-v5/tests/test_theory.py b/HLA-v5/tests/test_theory.py
+new file mode 100644
+index 0000000..bbfdf46
+--- /dev/null
++++ b/HLA-v5/tests/test_theory.py
+@@ -0,0 +1,168 @@
++"""Numerical verification of every theorem in docs/THEORY.md.
++
++Each test cites its theorem. If a refactor breaks a mathematical guarantee,
++this file is where CI catches it.
++"""
++from __future__ import annotations
++
++import math
++import os
++import sys
++
++import pytest
++import torch
++
++ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++if ROOT not in sys.path:
++    sys.path.insert(0, ROOT)
++
++from src.model import GPT, GPTConfig  # noqa: E402
++
++
++def cfg(**kw):
++    base = dict(block_size=64, vocab_size=256, n_layer=2, n_head=2, n_embd=32,
++                gradient_checkpointing=False)
++    base.update(kw)
++    return GPTConfig(**base)
++
++
++ALL_ON = dict(phase_mult=0.15, use_laplace=True, laplace_alpha=1.0,
++              use_salience_bias=True, salience_alpha=1.0,
++              use_distance_laplace=True, distance_laplace_alpha=0.5,
++              use_forget_gate=True, forget_alpha=1.0,
++              use_rope=True, use_wpe=False)
++ALL_OFF = dict(phase_mult=0.0, use_laplace=True, laplace_alpha=0.0,
++               use_salience_bias=True, salience_alpha=0.0,
++               use_distance_laplace=True, distance_laplace_alpha=0.0,
++               use_forget_gate=True, forget_alpha=0.0,
++               use_rope=True, use_wpe=False)
++
++
++class TestTheorem1Identity:
++    """HLA(x; backbone, 0) == GPT(x; backbone), exactly."""
++
++    def test_bit_exact_all_mechanisms(self):
++        torch.manual_seed(0)
++        base = GPT(cfg(**ALL_OFF)).eval()
++        hla = GPT(cfg(**ALL_ON)).eval()
++        hla.load_state_dict(base.state_dict(), strict=True)
++        hla.reset_hla_identity()
++        for _ in range(3):
++            x = torch.randint(0, 256, (2, 32))
++            lb, _ = base(x)
++            lh, _ = hla(x)
++            assert torch.equal(lb, lh)
++
++
++class TestTheorem2StrictInclusion:
++    """F_base is a strict subset of F_HLA: the salience witness."""
++
++    def test_base_with_zero_wq_is_uniform(self):
++        model = GPT(cfg(use_salience_bias=True, salience_alpha=1.0)).eval()
++        attn = model.transformer.h[0].attn
++        with torch.no_grad():
++            attn.c_attn.weight[: attn.n_embd, :].zero_()  # W_Q = 0
++        model.set_diagnostics(enabled=True, capture_attention=True)
++        x = torch.randint(0, 256, (1, 16))
++        model(x)
++        row = model.transformer.h[0].attn.last_attn[0, 0][10, :11]
++        assert float(row.max() - row.min()) < 1e-6, "W_Q=0 must give uniform attention in base"
++
++    def test_salience_escapes_base_class(self):
++        model = GPT(cfg(use_salience_bias=True, salience_alpha=1.0, salience_range=2.0)).eval()
++        attn = model.transformer.h[0].attn
++        with torch.no_grad():
++            attn.c_attn.weight[: attn.n_embd, :].zero_()
++            attn.W_gate_sal.weight.normal_(0, 1.0)
++        model.set_diagnostics(enabled=True, capture_attention=True)
++        x = torch.randint(0, 256, (1, 16))
++        model(x)
++        row = model.transformer.h[0].attn.last_attn[0, 0][10, :11]
++        assert float(row.max() - row.min()) > 0.01, "salience must produce key-dependent attention at W_Q=0"
++
++
++class TestTheorem3Isometry:
++    def test_norm_preservation_random_angles(self):
++        model = GPT(cfg(**ALL_ON)).eval()
++        attn = model.transformer.h[0].attn
++        for _ in range(3):
++            z = torch.randn(2, 4, 8, attn.head_dim)
++            th = torch.randn(2, 4, 8, attn.head_dim // 2) * 3.0
++            r = attn._rotate_pairwise(z, torch.cos(th), torch.sin(th))
++            assert torch.allclose(z.norm(dim=-1), r.norm(dim=-1), atol=1e-5)
++
++    def test_group_action(self):
++        model = GPT(cfg(**ALL_ON)).eval()
++        attn = model.transformer.h[0].attn
++        z = torch.randn(1, 2, 4, attn.head_dim)
++        a = torch.randn(1, 2, 4, attn.head_dim // 2)
++        b = torch.randn(1, 2, 4, attn.head_dim // 2)
++        ab = attn._rotate_pairwise(attn._rotate_pairwise(z, torch.cos(a), torch.sin(a)),
++                                   torch.cos(b), torch.sin(b))
++        direct = attn._rotate_pairwise(z, torch.cos(a + b), torch.sin(a + b))
++        assert torch.allclose(ab, direct, atol=1e-5)
++
++
++class TestTheorem4Envelopes:
++    """Score perturbation bounded regardless of weights/inputs."""
++
++    def test_total_bias_bounded_at_saturation(self):
++        c = cfg(**ALL_ON)
++        model = GPT(c).eval()
++        with torch.no_grad():
++            for blk in model.transformer.h:
++                blk.attn.W_gate_sal.weight.fill_(1000.0)
++                blk.attn.W_gate_f.weight.fill_(1000.0)
++                blk.attn.W_gate_k.weight.fill_(1000.0)
++        model.set_diagnostics(enabled=True)
++        x = torch.randint(0, 256, (1, 64))
++        logits, _ = model(x)
++        assert torch.isfinite(logits).all()
++        lm = 1.0  # layer_dependent_gate off in this cfg
++        bound = c.salience_clip + c.distance_laplace_clip * lm + c.forget_clip
++        for blk in model.transformer.h:
++            total = (float(blk.attn.last_salience_bias_abs_mean)
++                     + float(blk.attn.last_distance_bias_abs_mean)
++                     + float(blk.attn.last_forget_bias_abs_mean))
++            assert total <= bound + 1e-4
++
++    def test_mix_envelope_exact_endpoints(self):
++        c = cfg(**ALL_ON)
++        model = GPT(c).eval()
++        with torch.no_grad():
++            for blk in model.transformer.h:
++                blk.attn.W_gate_k.weight.fill_(1000.0)   # tanh -> sign(sum x): +-1
++                blk.attn.W_range_k.fill_(1000.0)          # range at +25%
++        model.set_diagnostics(enabled=True)
++        x = torch.randint(0, 256, (1, 32))
++        model(x)
++        eff = min(c.laplace_alpha * c.laplace_range_k * 1.25, c.k_log_clip)
++        expected_hi = (1 - c.beta_k) + c.beta_k * math.exp(eff)
++        expected_lo = (1 - c.beta_k) + c.beta_k * math.exp(-eff)
++        # gate = tanh(1000 * sum(x)) = exactly +1 or -1 per position (sign of
++        # the input projection), so the mix tensor must sit exactly at the two
++        # envelope endpoints - and never beyond.
++        mix = model.transformer.h[0].attn.last_mix_k.float()
++        assert abs(float(mix.max()) - expected_hi) < 1e-3
++        assert abs(float(mix.min()) - expected_lo) < 1e-3
++
++
++class TestTheorem5FirstOrderSignal:
++    def test_mechanism_gradients_nonzero_at_identity(self):
++        torch.manual_seed(3)
++        model = GPT(cfg(**ALL_ON))
++        model.train()
++        x = torch.randint(0, 256, (4, 32))
++        _, loss = model(x, x)
++        loss.backward()
++        mech_sq = 0.0
++        for n, p in model.named_parameters():
++            if p.grad is not None and any(m in n for m in ("W_phase", "W_gate", "W_range")):
++                mech_sq += float(p.grad.pow(2).sum())
++        assert mech_sq > 0.0, "identity point must not be a saddle for the mechanisms"
++
++    def test_tanh_derivative_at_zero_is_one(self):
++        """The reason Theorem 5 works: gradient passes tanh(0) undamped."""
++        z = torch.zeros(5, requires_grad=True)
++        torch.tanh(z).sum().backward()
++        assert torch.allclose(z.grad, torch.ones(5))
+diff --git a/HLA-v5/tests/test_train_utils.py b/HLA-v5/tests/test_train_utils.py
+index 3e7a5be..73ea53e 100644
+--- a/HLA-v5/tests/test_train_utils.py
++++ b/HLA-v5/tests/test_train_utils.py
+@@ -239,6 +239,23 @@ class TestCompatChecks:
+         with pytest.raises(ValueError):
+             validate_init_config_compatibility(cur, saved)
+ 
++    def test_init_positional_scheme_mismatch_rejected(self):
++        """R19 (adversarial review round 2): an init checkpoint trained with
++        wpe must not silently load into a RoPE-only model."""
++        cur = {"model": {"n_embd": 32, "use_rope": True, "use_wpe": False}}
++        saved = {"model": {"n_embd": 32, "use_rope": False, "use_wpe": True}}
++        with pytest.raises(ValueError):
++            validate_init_config_compatibility(cur, saved)
++
++    def test_init_padded_vocab_mismatch_rejected(self):
++        # NOTE: None in the saved config means "unknown" (legacy checkpoint)
++        # and is deliberately skipped; only a *different concrete value* is
++        # an error. That is what we test here.
++        cur = {"model": {"n_embd": 32, "padded_vocab_size": 50304}}
++        saved = {"model": {"n_embd": 32, "padded_vocab_size": 50432}}
++        with pytest.raises(ValueError):
++            validate_init_config_compatibility(cur, saved)
++
+     def test_none_saved_is_ok(self):
+         validate_resume_config_compatibility({"seed": 1}, None)
+         validate_init_config_compatibility({"model": {}}, None)
+diff --git a/README.md b/README.md
+index 992436b..6f69dd3 100644
+--- a/README.md
++++ b/README.md
+@@ -6,7 +6,7 @@
+ 
+ **A drop-in attention mechanism that separates *finding* tokens from *transmitting* them —<br>starting as a bit-exact standard Transformer and learning how much separation it needs.**
+ 
+-[![Tests](https://img.shields.io/badge/tests-119%20passing-brightgreen)](HLA-v5/tests/) [![Sterile](https://img.shields.io/badge/comparisons-bit--exact%20sterile-blueviolet)](#-sterile-by-construction) [![Metrics](https://img.shields.io/badge/metrics-documented-blue)](HLA-v5/docs/METRICS.md) [![PyTorch](https://img.shields.io/badge/PyTorch-2.x%20%7C%20XLA%2FTPU-orange)](HLA-v5/configs/) [![License](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
++[![tests](https://github.com/fanat503/Laplace-attention/actions/workflows/tests.yml/badge.svg)](https://github.com/fanat503/Laplace-attention/actions/workflows/tests.yml) [![Sterile](https://img.shields.io/badge/comparisons-bit--exact%20sterile-blueviolet)](#-sterile-by-construction) [![Metrics](https://img.shields.io/badge/metrics-documented-blue)](HLA-v5/docs/METRICS.md) [![PyTorch](https://img.shields.io/badge/PyTorch-2.x%20%7C%20XLA%2FTPU-orange)](HLA-v5/configs/) [![License](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
+ 
+ [The problem](#-the-problem) · [The idea](#-the-idea) · [Mechanisms](#-four-mechanisms-one-principle) · [Sterility](#-sterile-by-construction) · [Diagnostics](#-measure-everything) · [Quick start](#-quick-start) · [Results](#-status--roadmap) · [FAQ](#-faq)
+ 
+@@ -85,6 +85,15 @@ score += clamp(α_d · range_d · dist(t,s) · gate_k(x_s), ±clip_d)
+ 
+ **Bidirectional**, unlike a pure forget gate: negative-gate keys decay with distance, positive-gate keys *survive* at long range — each key's content decides.
+ 
++### FoX-style cumulative forget gate (baseline mechanism, built-in)
++
++```
++S_t     = cumsum( α_f · range_f · tanh(W_f · x_t) )
++score  += clamp(S_i − S_j, ±clip_f)
++```
++
++The Forgetting-Transformer hypothesis (cumulative data-dependent decay), reproduced **inside the sterile harness**: identity-init, parameter-matched, same data — enabling the cleanest FoX-vs-HLA comparison possible. Use it as an ablation arm or as an external-baseline run.
++
+ ### Learned depth profile (optional everywhere)
+ 
+ ```
+@@ -111,7 +120,7 @@ Ships with **parameter-matched** *and* **FLOPs-matched** config pairs (200M →
+ 
+ ## Measure everything
+ 
+-Full math for every metric: [`docs/METRICS.md`](HLA-v5/docs/METRICS.md). The highlights:
++Full math for every metric: [`docs/METRICS.md`](HLA-v5/docs/METRICS.md) · unified formula & theorems: [`docs/THEORY.md`](HLA-v5/docs/THEORY.md) · formal sterility protocol: [`docs/STERILITY.md`](HLA-v5/docs/STERILITY.md) · pre-registration: [`docs/EXPERIMENT_CARD.md`](HLA-v5/docs/EXPERIMENT_CARD.md). The highlights:
+ 
+ | Question | Metric (logged to CSV during training) |
+ |---|---|
+@@ -131,7 +140,7 @@ pip install torch pytest                    # CPU is enough for tests & init
+ cd HLA-v5
+ 
+ # 0 · Trust nothing, verify (always, before any TPU time)
+-python -m pytest tests/ -q                  # → 119 passed
++python -m pytest tests/ -q                  # → 162 passed
+ 
+ # 1 · Sterility gate + numeric sanity audit for the config pair
+ python scripts/validate_configs.py \
+@@ -172,17 +181,17 @@ HLA-v5/
+ │                       #   v2 recipe (aggressive envelope + salience), pilot, smoke
+ ├── scripts/            # validate_configs, sterility audit, data prep, analysis
+ ├── docs/METRICS.md     # exact math of every metric
+-└── tests/              # 119 CPU tests — run anywhere, no TPU needed
++└── tests/              # 162 CPU tests — run anywhere, no TPU needed
+ ```
+ 
+-## 119 tests = the paper's claims, executable
++## 162 tests = the paper's claims, executable
+ 
+ Sterility (bit-exact identity, parameter matching, corrupted-init rejection) · causality (permutation tests, every mechanism) · math invariants (rotation isometry & invertibility, envelope bounds under saturation, budget bounds, batch invariance) · training (one-step parity from shared init, gradient flow to every *active* param, frozen *inactive* params, NaN-robustness at extreme weights) · backends (SDPA ↔ manual parity; SDPA refuses to silently drop active biases) · metric ground truth (interference = 0 for orthogonal heads, = self for identical heads; rank-1 collapse detection) · data & trainer (determinism, sharding without duplicates, exact-suffix resume, LR schedule endpoints).
+ 
+ ## Status & roadmap
+ 
+ - [x] v3/v4: −0.09 val-loss gap @ 100M (pre-sterile-infrastructure)
+-- [x] v5 infrastructure: mechanisms, sterility protocol, diagnostics, 119 tests
++- [x] v5 infrastructure: mechanisms, sterility protocol, diagnostics, 162 tests
+ - [ ] Smoke + pilot @ Kaggle TPU v5e-8 ← **here**
+ - [ ] 200M pairs: v1 (soft gates) & v2 (aggressive + salience), reproduce the gap sterile
+ - [ ] Component ablations: phase / gates / salience / distance / learned-temp / per-head
