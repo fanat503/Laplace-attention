@@ -119,6 +119,21 @@ class CausalSelfAttention(nn.Module):
         self.distance_laplace_alpha = float(getattr(config, "distance_laplace_alpha", 0.0))
         self.distance_laplace_range = float(getattr(config, "distance_laplace_range", 1.0))
         self.distance_laplace_clip = float(getattr(config, "distance_laplace_clip", 1.0))
+        # Cumulative forget-gate bias (FoX-family, identity-initialized).
+        # FoX (Lin et al., ICLR 2025) down-weights score_ij by the sum of
+        # log-forget values between key j and query i. We implement the same
+        # cumulative structure but bidirectional and exactly identity at init:
+        #   g_t   = tanh(W_gate_f(x_t))                (zero at init)
+        #   S_i   = cumsum_t( alpha_f * range_f * g_t )
+        #   bias_ij = clamp(S_i - S_j, +-clip_f)       (zero at init)
+        # Negative g_t = token t "closes the gate" behind it (recency bias,
+        # FoX-style forgetting); positive g_t = token t keeps history alive.
+        # This makes the FoX-hypothesis (cumulative decay helps) directly
+        # testable inside the sterile harness as one more ablation arm.
+        self.use_forget_gate = bool(getattr(config, "use_forget_gate", False))
+        self.forget_alpha = float(getattr(config, "forget_alpha", 0.0))
+        self.forget_range = float(getattr(config, "forget_range", 0.1))
+        self.forget_clip = float(getattr(config, "forget_clip", 4.0))
         # Content-based salience bias: additive log-space bias per KEY position,
         # b_j = alpha * range * tanh(W_gate_sal(x_j)). Unlike the multiplicative
         # K-mix (which has a floor of 1-beta_k), an additive bias can suppress a
@@ -165,11 +180,14 @@ class CausalSelfAttention(nn.Module):
         # Always created (regardless of use_salience_bias) so base/HLA stay
         # parameter-matched; inactive branch is disabled via salience_alpha=0.
         self.W_gate_sal = nn.Linear(config.n_embd, self.n_head, bias=False)
-
+        # Forget gate params: same always-created pattern for param matching.
+        self.W_gate_f = nn.Linear(config.n_embd, self.n_head, bias=False)
+        self.W_range_f = nn.Parameter(torch.zeros(self.n_head))
 
         nn.init.constant_(self.W_gate_k.weight, 0.0)
         nn.init.constant_(self.W_gate_v.weight, 0.0)
         nn.init.constant_(self.W_gate_sal.weight, 0.0)
+        nn.init.constant_(self.W_gate_f.weight, 0.0)
 
         self.register_buffer(
             "mask",
@@ -210,6 +228,8 @@ class CausalSelfAttention(nn.Module):
         self.last_distance_bias_abs_mean: Optional[torch.Tensor] = None
         self.last_salience_bias_abs_mean: Optional[torch.Tensor] = None
         self.last_salience_sat_frac: Optional[torch.Tensor] = None
+        self.last_forget_bias_abs_mean: Optional[torch.Tensor] = None
+        self.last_forget_sat_frac: Optional[torch.Tensor] = None
 
     def reset_hla_identity(self) -> None:
         """Reset HLA-specific parameters to the exact identity state."""
@@ -221,6 +241,8 @@ class CausalSelfAttention(nn.Module):
             self.W_gate_k.weight.zero_()
             self.W_gate_v.weight.zero_()
             self.W_gate_sal.weight.zero_()
+            self.W_gate_f.weight.zero_()
+            self.W_range_f.zero_()
             self.W_layer_temp.zero_()
             self.W_phase_scale.zero_()
 
@@ -404,6 +426,7 @@ class CausalSelfAttention(nn.Module):
             and not self.capture_attention
             and not (self.use_distance_laplace and self.distance_laplace_alpha != 0.0)
             and not (self.use_salience_bias and self.salience_alpha != 0.0)
+            and not (self.use_forget_gate and self.forget_alpha != 0.0)
         )
         if sdpa_ok:
 
@@ -461,6 +484,27 @@ class CausalSelfAttention(nn.Module):
                 self.last_salience_bias_abs_mean = zero
                 self.last_salience_sat_frac = zero
 
+        if self.use_forget_gate and self.forget_alpha != 0.0:
+            # FoX-style cumulative gate (identity at init: W_gate_f = 0).
+            # S_t = cumsum of per-token log-forget; bias_ij = S_i - S_j is the
+            # total gate "mass" between key j and query i. Causal mask below
+            # removes j > i, so only past-directed biases survive.
+            gate_f = torch.tanh(self.W_gate_f(x)).float()          # (B, T, H)
+            range_f = (self.forget_range * (1.0 + 0.25 * torch.tanh(self.W_range_f.float()))).view(1, 1, self.n_head)
+            log_f = self.forget_alpha * gate_f * range_f            # (B, T, H)
+            S = torch.cumsum(log_f, dim=1).transpose(1, 2)          # (B, H, T)
+            forget_bias = S.unsqueeze(-1) - S.unsqueeze(-2)         # (B,H,T_q,T_k) = S_i - S_j
+            forget_bias = torch.clamp(forget_bias, min=-self.forget_clip, max=self.forget_clip)
+            att = att + forget_bias.to(att.dtype)
+            with torch.no_grad():
+                self.last_forget_bias_abs_mean = forget_bias.detach().float().abs().mean()
+                self.last_forget_sat_frac = (gate_f.detach().abs() > 0.99).float().mean()
+        elif self.capture_diagnostics:
+            with torch.no_grad():
+                zero = torch.zeros((), device=x.device)
+                self.last_forget_bias_abs_mean = zero
+                self.last_forget_sat_frac = zero
+
         mask = self.mask[:, :, :T, :T]
         att = att.masked_fill(~mask, float("-inf"))
 
@@ -468,14 +512,19 @@ class CausalSelfAttention(nn.Module):
         att = att - att.amax(dim=-1, keepdim=True)
         att = F.softmax(att, dim=-1).to(q.dtype)
 
-        with torch.no_grad():
-            p = att.detach().float().clamp(min=1e-9)
-            entropy = -(p * p.log()).sum(dim=-1).mean(dim=(0, 2))  # (H,)
-            self.last_entropy = entropy.detach()
-            if self.capture_attention:
-                self.last_attn = att.detach().float()
-            elif self.capture_diagnostics:
-                self.last_attn = None
+        # Entropy is an eval-time diagnostic. Computing it on EVERY training
+        # forward wastes O(B*H*T^2) work per layer and adds host-sync pressure
+        # on XLA. Gate it behind eval/diagnostics; measure_attention_entropy()
+        # runs in eval mode, so it still works unchanged.
+        if (not self.training) or self.capture_diagnostics:
+            with torch.no_grad():
+                p = att.detach().float().clamp(min=1e-9)
+                entropy = -(p * p.log()).sum(dim=-1).mean(dim=(0, 2))  # (H,)
+                self.last_entropy = entropy.detach()
+                if self.capture_attention:
+                    self.last_attn = att.detach().float()
+                elif self.capture_diagnostics:
+                    self.last_attn = None
 
         y = att @ v
         y = y.transpose(1, 2).contiguous().view(B, T, C)
@@ -510,7 +559,7 @@ class GPTConfig:
     n_layer: int = 24
     n_head: int = 16
     n_embd: int = 1536
-    dropout: float = 0.0  # kept for config compatibility; original model does not use dropout
+    dropout: float = 0.0  # accepted for config compat but NOT implemented; enforced 0.0 in __post_init__
     bias: bool = False    # kept for config compatibility; original model uses bias=False
 
     phase_mult: float = 0.0
@@ -547,6 +596,15 @@ class GPTConfig:
     salience_range: float = 1.0
     salience_clip: float = 2.0
 
+    # FoX-style cumulative forget gate (bidirectional, identity-init).
+    # Enables testing the Forgetting-Transformer hypothesis inside the same
+    # sterile harness: use_forget_gate=true + forget_alpha=1.0 as an ablation
+    # arm, or as THE mechanism with all others off (= FoX-like baseline).
+    use_forget_gate: bool = False
+    forget_alpha: float = 0.0
+    forget_range: float = 0.1
+    forget_clip: float = 4.0
+
     # Learnable per-layer gate temperature (requires layer_dependent_gate).
     # Identity-compatible: at theta=0 the multiplier equals the static heuristic.
     learnable_layer_temp: bool = False
@@ -568,6 +626,11 @@ class GPTConfig:
     def __post_init__(self) -> None:
         if self.block_size <= 0:
             raise ValueError("block_size must be positive")
+        if self.dropout != 0.0:
+            # R26 (review round 4): dropout is accepted in configs for
+            # compatibility but is NOT wired into any layer. Silently ignoring
+            # a non-zero value would be a lying config - refuse instead.
+            raise ValueError("dropout is not implemented in this model; set dropout=0.0")
         if self.vocab_size <= 0:
             raise ValueError("vocab_size must be positive")
         if self.padded_vocab_size is not None and self.padded_vocab_size < self.vocab_size:
@@ -594,6 +657,10 @@ class GPTConfig:
             raise ValueError("salience_range must be non-negative")
         if self.salience_clip <= 0:
             raise ValueError("salience_clip must be positive")
+        if self.forget_range < 0:
+            raise ValueError("forget_range must be non-negative")
+        if self.forget_clip <= 0:
+            raise ValueError("forget_clip must be positive")
         if self.learnable_layer_temp and not self.layer_dependent_gate:
             raise ValueError("learnable_layer_temp requires layer_dependent_gate=true")
         if self.layer_dependent_phase and not self.layer_dependent_gate:
@@ -697,6 +764,46 @@ class GPT(nn.Module):
 
         return logits, loss
 
+    @torch.no_grad()
+    def generate(
+        self,
+        idx: torch.Tensor,
+        max_new_tokens: int,
+        *,
+        temperature: float = 1.0,
+        top_k: Optional[int] = None,
+        greedy: bool = False,
+    ) -> torch.Tensor:
+        """Autoregressive decoding for evals and qualitative samples.
+
+        Minimal by design (no KV-cache): correctness over speed, suitable for
+        lm-eval-harness-style scoring and small demos. Crops context to
+        block_size; never samples padded-vocab ids (they are masked out).
+        """
+        was_training = self.training
+        self.eval()
+        try:
+            for _ in range(int(max_new_tokens)):
+                idx_cond = idx[:, -self.config.block_size:]
+                logits, _ = self(idx_cond)
+                logits = logits[:, -1, :].float()
+                if self.padded_vocab_size != self.config.vocab_size:
+                    logits[..., self.config.vocab_size:] = float("-inf")
+                if greedy:
+                    next_id = logits.argmax(dim=-1, keepdim=True)
+                else:
+                    logits = logits / max(float(temperature), 1e-6)
+                    if top_k is not None:
+                        k = min(int(top_k), logits.size(-1))
+                        v, _ = torch.topk(logits, k)
+                        logits[logits < v[:, [-1]]] = float("-inf")
+                    probs = F.softmax(logits, dim=-1)
+                    next_id = torch.multinomial(probs, num_samples=1)
+                idx = torch.cat([idx, next_id], dim=1)
+            return idx
+        finally:
+            self.train(was_training)
+
     def set_diagnostics(self, *, enabled: bool, capture_attention: bool = False) -> None:
         for block in self.transformer.h:
             block.attn.capture_diagnostics = bool(enabled)
@@ -716,6 +823,8 @@ class GPT(nn.Module):
                 attn.W_gate_k.weight,
                 attn.W_gate_v.weight,
                 attn.W_gate_sal.weight,
+                attn.W_gate_f.weight,
+                attn.W_range_f,
                 attn.W_layer_temp,
                 attn.W_phase_scale,
             ]:

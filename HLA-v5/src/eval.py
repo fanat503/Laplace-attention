@@ -153,6 +153,8 @@ def hla_statistics(model) -> Dict[str, float]:
         "gate_v_sat_frac": [],
         "salience_bias_abs_mean": [],
         "salience_sat_frac": [],
+        "forget_bias_abs_mean": [],
+        "forget_sat_frac": [],
     }
     for block in model.transformer.h:
         attn = block.attn
@@ -174,6 +176,8 @@ def hla_statistics(model) -> Dict[str, float]:
             "gate_v_sat_frac": getattr(attn, "last_gate_v_sat_frac", None),
             "salience_bias_abs_mean": getattr(attn, "last_salience_bias_abs_mean", None),
             "salience_sat_frac": getattr(attn, "last_salience_sat_frac", None),
+            "forget_bias_abs_mean": getattr(attn, "last_forget_bias_abs_mean", None),
+            "forget_sat_frac": getattr(attn, "last_forget_sat_frac", None),
         }
         for k, v in mapping.items():
             if v is not None:
