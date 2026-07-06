@@ -6,9 +6,9 @@
 
 **A drop-in attention mechanism that separates *finding* tokens from *transmitting* them —<br>starting as a bit-exact standard Transformer and learning how much separation it needs.**
 
-[![tests](https://github.com/fanat503/Laplace-attention/actions/workflows/tests.yml/badge.svg)](https://github.com/fanat503/Laplace-attention/actions/workflows/tests.yml) [![Sterile](https://img.shields.io/badge/comparisons-bit--exact%20sterile-blueviolet)](#-sterile-by-construction) [![Metrics](https://img.shields.io/badge/metrics-documented-blue)](HLA-v5/docs/METRICS.md) [![PyTorch](https://img.shields.io/badge/PyTorch-2.x%20%7C%20XLA%2FTPU-orange)](HLA-v5/configs/) [![License](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
+[![tests](https://github.com/fanat503/Laplace-attention/actions/workflows/tests.yml/badge.svg)](https://github.com/fanat503/Laplace-attention/actions/workflows/tests.yml) [![Sterile](https://img.shields.io/badge/comparisons-bit--exact%20sterile-blueviolet)](#sterile-by-construction) [![Metrics](https://img.shields.io/badge/metrics-documented-blue)](HLA-v5/docs/METRICS.md) [![PyTorch](https://img.shields.io/badge/PyTorch-2.x%20%7C%20XLA%2FTPU-orange)](HLA-v5/requirements.txt) [![License](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
 
-[The problem](#-the-problem) · [The idea](#-the-idea) · [Mechanisms](#-four-mechanisms-one-principle) · [Sterility](#-sterile-by-construction) · [Diagnostics](#-measure-everything) · [Quick start](#-quick-start) · [Results](#-status--roadmap) · [FAQ](#-faq)
+[The problem](#the-problem) · [The idea](#the-idea) · [Mechanisms](#four-mechanisms-one-principle) · [Sterility](#sterile-by-construction) · [Diagnostics](#measure-everything) · [Quick start](#quick-start) · [Results](#status--roadmap) · [FAQ](#faq)
 
 </div>
 

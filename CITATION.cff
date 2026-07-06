@@ -7,8 +7,8 @@ abstract: >
   bidirectional Laplace gating (K/V), additive salience bias, and
   distance-aware biasing, with a sterile bit-exact comparison harness.
 authors:
-  - family-names: "fanat503"
-    given-names: ""
+  - family-names: "Slyatski"
+    given-names: "Ilya"
 repository-code: "https://github.com/fanat503/Laplace-attention"
 license: MIT
 keywords:
