@@ -43,18 +43,18 @@ score_ij = ( R(θ_i)·q_i ) · ( m_j · R(φ_j)·k_j ) / √d  +  B_ij
 out_i    = Σ_{j≤i} softmax_j(score_ij) · ( u_j · v_j )
 ```
 
-| Symbol | Role | Mechanism | At init |
+| Symbol | Role | Config switch | At init |
 |---|---|---|---|
-| `R(θ_i)`, `R(φ_j)` | rotate Q/K into learned matching geometry | phase rotation | identity `I` |
-| `m_j` | multiplicative key salience (floor `1−β_k`) | Laplace K-gate | `1` |
-| `u_j` | multiplicative content volume | Laplace V-gate | `1` |
-| `B_ij` | additive score bias = salience + distance + forget | three bias channels | `0` |
+| `R(θ_i)`, `R(φ_j)` | rotate Q/K into learned matching geometry | `phase_mult` | identity `I` |
+| `m_j` | multiplicative key salience (floor `1−β_k`) | `use_laplace` + `laplace_alpha` | `1` |
+| `u_j` | multiplicative content volume | same pair (V side) | `1` |
+| `B_ij` | additive score bias = salience + distance + forget | `use_salience_bias` / `use_distance_laplace` / `use_forget_gate` | `0` |
 
-Retrieval (inside softmax) and transmission (`u_j·v_j`) share **no learned scalars** — that is the decoupling, stated syntactically. Proven properties: exact identity at init (T1), strictly larger function class than the baseline (T2), rotation is an isometry (T3), all perturbations analytically bounded (T4), mechanisms receive non-zero gradient from step one (T5) — each theorem is verified numerically in `tests/test_theory.py`.
+Retrieval (inside softmax) and transmission (`u_j·v_j`) share **no learned scalars** — that is the decoupling, stated syntactically. Proven and numerically verified in `tests/test_theory.py` (9 tests): exact identity at init (T1), strictly larger function class than the baseline (T2), rotation is an isometry and a group action (T3), all perturbations analytically bounded (T4), mechanisms receive non-zero gradient from step one (T5).
 
 ## The mechanisms
 
-*Every formula below is the actual code (`HLA-v5/src/model.py`), not a simplification.*
+*Every formula below is the actual code (`HLA-v5/src/model.py`, 838 lines, single file), not a simplification.*
 
 | # | Mechanism | Acts on | One-line intuition |
 |---|---|---|---|
@@ -63,7 +63,7 @@ Retrieval (inside softmax) and transmission (`u_j·v_j`) share **no learned scal
 | 3 | **Salience bias** | scores, additive | silence distractors ×0.135, amplify targets ×7.4 — no floor |
 | 4 | **Distance bias** | scores, additive | each key's content decides how far it reaches |
 | 5 | **Forget gate** (FoX-family, **baseline arm — OFF in all HLA configs**) | scores, cumulative | the Forgetting-Transformer hypothesis, reproduced in-harness for fair comparison (Lin et al., ICLR 2025) |
-| 6 | **Adaptivity axes** | budgets of 1–4 | per-head (`per_head_phase`, `W_range_*`) and per-depth (`layer_dependent_*`, learnable temperature) |
+| 6 | **Adaptivity axes** | budgets of 1–4 | per-head (`per_head_phase`, learned `W_range_*`) and per-depth (`layer_dependent_gate`/`_phase`, `learnable_layer_temp`) |
 
 ### 1 · Content-conditioned phase rotation
 
@@ -83,7 +83,7 @@ mix   = (1−β) + β · exp(clamp(α · gate · range, ±clip))
 k, v  = k · mix_k,  v · mix_v
 ```
 
-Analytic envelope `mix ∈ [(1−β)+β·e^(−c), (1−β)+β·e^(c)]`; the clip is a numerical guard that never binds in shipped configs (verified by `audit_config_values.py`). The deliberate **floor** (1−β) means gating whispers — it cannot silence. Silencing is salience's job:
+Analytic envelope `mix ∈ [(1−β)+β·e^(−c), (1−β)+β·e^(c)]`; the clip is a numerical guard that never binds in shipped configs (checked by `audit_config_values.py`). The deliberate **floor** (1−β) means gating whispers — it cannot silence. Silencing is salience's job:
 
 ### 3 · Additive salience bias — no floor
 
@@ -120,7 +120,7 @@ At θ=0 this **equals** the static heuristic `1 + l/L` exactly — the model the
 
 ## Sterile by construction
 
-**The comparison methodology is a contribution in itself** (formal protocol with threat model: [`docs/STERILITY.md`](HLA-v5/docs/STERILITY.md)). Base and HLA differ in *nothing* except the active mechanisms:
+**The comparison methodology is a contribution in itself** (formal protocol with invariants I1–I5 and a threat model: [`docs/STERILITY.md`](HLA-v5/docs/STERILITY.md)). Base and HLA differ in *nothing* except the active mechanisms:
 
 | Guarantee | Enforcement |
 |---|---|
@@ -133,13 +133,13 @@ At θ=0 this **equals** the static heuristic `1 + l/L` exactly — the model the
 | Zero future leakage | permutation causality tests across every mechanism (incl. the cumulative forget gate) |
 | Full provenance | config hashes, env snapshots, dataset manifests stored with every run |
 
-Ships with **parameter-matched** *and* **FLOPs-matched** config pairs (200M → 800M), plus a **single-factor ablation matrix generator** (`make_ablation_configs.py`: 9 arms × N seeds, shared init per seed ⇒ paired statistics by construction).
+Ships with **parameter-matched** *and* **FLOPs-matched** config pairs, plus a **single-factor ablation matrix generator** (`make_ablation_configs.py`: 9 arms × N seeds, shared init per seed ⇒ paired statistics by construction).
 
 ## Measure everything
 
-Full math for every metric: [`docs/METRICS.md`](HLA-v5/docs/METRICS.md) · theory: [`docs/THEORY.md`](HLA-v5/docs/THEORY.md) · pre-registered experimental plan: [`docs/EXPERIMENT_CARD.md`](HLA-v5/docs/EXPERIMENT_CARD.md) · data provenance: [`docs/DATA_CARD.md`](HLA-v5/docs/DATA_CARD.md).
+Full math for every metric: [`docs/METRICS.md`](HLA-v5/docs/METRICS.md) · theory: [`docs/THEORY.md`](HLA-v5/docs/THEORY.md) · pre-registered plan: [`docs/EXPERIMENT_CARD.md`](HLA-v5/docs/EXPERIMENT_CARD.md) · data provenance: [`docs/DATA_CARD.md`](HLA-v5/docs/DATA_CARD.md).
 
-| Question | Metric (logged to CSV during training) |
+| Question | Metric (logged to the training CSV) |
 |---|---|
 | Is retrieval getting *cleaner* while composition survives? | `qk_interference` ↓, `ov_interference` ≈, `qk_ov_separation` ↑ — Transformer-Circuits-style subspace overlaps |
 | Does the model resist *attractive* noise? | `distractor_margin` = P(target) − max P(distractor), induction probes with repeated competing patterns |
@@ -175,7 +175,7 @@ python src/make_init.py --shared-backbone \
     --base-config configs/200m_base_s42.json --hla-config configs/200m_hla_s42.json \
     --out-base inits/init_200m_base_s42.pt  --out-hla inits/init_200m_hla_s42.pt
 
-# 4 · Train both from the same weights (TPU/XLA; runs are sequential — one run uses all 8 cores)
+# 4 · Train both from the same weights (TPU/XLA; sequential — one run uses all 8 cores)
 python src/train_xla.py --config configs/200m_base_s42.json
 python src/train_xla.py --config configs/200m_hla_s42.json
 
@@ -194,42 +194,56 @@ python src/train_xla.py --config configs/200m_hla_s42.json \
 
 ## Repository layout
 
+*(generated from the actual tree — every count is real)*
+
 ```
 Laplace-attention/
-├── README.md · LICENSE · CITATION.cff · CONTRIBUTING.md
-├── .github/workflows/tests.yml   # CI: 162 tests + 3 audits on every push/PR
-├── HLA-v4/                       # archived previous iteration (identity-init bug fixed retroactively)
-└── HLA-v5/                       # ← current version, all development here
-    ├── src/
-    │   ├── model.py              # GPT + all six mechanisms (single file, no framework magic)
-    │   ├── train_xla.py          # TPU trainer: sharded determinism, O(1) resume,
-    │   │                         #   token-weighted validation, crash-safe checkpoints
-    │   ├── data.py               # FixedDataset — sterile fixed-token pipeline (.pt / .bin+sidecar)
-    │   ├── eval.py               # induction / distractor / SVD / interference / depth-profile probes
-    │   ├── make_init.py          # shared-backbone sterile init generator
-    │   ├── manifest.py           # provenance & hashing
-    │   └── utils.py              # seeding, atomic IO
-    ├── configs/                  # paired base/HLA JSONs: 200m…800m, FLOPs-matched pair,
-    │                             #   v2 recipe (aggressive envelope + salience), pilot, smoke
-    ├── scripts/                  # 24 tools: validate_configs · audit_config_values ·
-    │                             #   audit_sterility · make_ablation_configs · prepare_c4_data ·
-    │                             #   profile_flops · analyze_subspaces · compare_attention_kl · …
-    ├── docs/
-    │   ├── THEORY.md             # unified formula + 5 proved & tested theorems
-    │   ├── STERILITY.md          # formal protocol: invariants I1–I5 + threat model
-    │   ├── METRICS.md            # exact math of every logged metric
-    │   ├── EXPERIMENT_CARD.md    # pre-registered hypotheses, run ladder, exclusion rules
-    │   └── DATA_CARD.md          # corpus, tokenizer, processing guarantees
-    ├── tests/                    # 162 CPU tests in 7 files — run anywhere, no TPU needed
+├── README.md · LICENSE · CITATION.cff · CONTRIBUTING.md · .gitignore
+├── .github/workflows/tests.yml     # CI: 162 tests + 3 audits on every push/PR, warnings-as-errors
+├── HLA-v4/                         # archived predecessor (3 files; identity-init bug fixed retroactively)
+│       make_init.py · modal_app.py · train1.py
+└── HLA-v5/                         # ← current version, all development here
+    ├── src/                        # 8 files, ~3 950 lines
+    │   ├── model.py                #   838 · GPT + all six mechanisms, generate(), single file
+    │   ├── train_xla.py            # 1 648 · TPU trainer: sharded determinism, O(1) resume,
+    │   │                           #         token-weighted validation, crash-safe checkpoints
+    │   ├── eval.py                 #   472 · induction / distractor / SVD / interference / depth probes
+    │   ├── make_init.py            #   422 · shared-backbone sterile init generator
+    │   ├── data.py                 #   362 · FixedDataset: fixed-token pipeline (.pt / .bin+sidecar)
+    │   ├── manifest.py             #   143 · provenance & hashing
+    │   ├── utils.py                #    63 · seeding, atomic IO
+    │   └── __init__.py
+    ├── configs/                    # 20 JSONs + README: paired base/HLA at 200m·300m·600m·700m·800m,
+    │                               #   FLOPs-matched 300m pair, batch-shape ablations (700m b2g16/b4g8/b8g4),
+    │                               #   v2 recipe (aggressive envelope + salience), pilot, smoke
+    ├── scripts/                    # 22 Python tools + 2 shell helpers
+    │   ├── validation:   validate_configs · audit_config_values · audit_sterility ·
+    │   │                 validate_data_pair · validate_log · verify_run · preflight.sh
+    │   ├── experiment:   make_ablation_configs · prepare_c4_data · prepare_data ·
+    │   │                 make_dummy_data · create_run_manifest · download_data_gcs.sh
+    │   ├── analysis:     analyze_checkpoint · analyze_subspaces · compare_attention_kl ·
+    │   │                 compare_inits · inspect_checkpoint · make_plots · profile_flops
+    │   └── utility:      check_dataloader · check_environment · count_params · estimate_budget
+    ├── docs/                       # 5 documents
+    │   ├── THEORY.md               #   unified formula + 5 proved & numerically verified theorems
+    │   ├── STERILITY.md            #   formal protocol: invariants I1–I5 + threat model
+    │   ├── METRICS.md              #   exact math of every logged metric
+    │   ├── EXPERIMENT_CARD.md      #   pre-registered hypotheses, run ladder, exclusion rules
+    │   └── DATA_CARD.md            #   corpus, tokenizer, processing guarantees
+    ├── tests/                      # 7 files · 162 tests · CPU-only, ~7 s
+    │   ├── test_model.py           #   73 · mechanisms, sterility, causality, bf16, generate
+    │   ├── test_train_utils.py     #   24 · LR schedule, sharded samplers, config compat, optimizer groups
+    │   ├── test_eval.py            #   19 · probes with ground-truth witnesses
+    │   ├── test_data.py            #   14 · determinism, sharding, .bin sidecars
+    │   ├── test_make_init.py       #   12 · shared-backbone equality, identity rejection
+    │   ├── test_ablation_configs.py#   11 · single-factor discipline, paired seeds
+    │   └── test_theory.py          #    9 · one test per theorem claim
     ├── requirements.txt · pyproject.toml
-    └── ...
 ```
 
 ## 162 tests = the paper's claims, executable
 
-Sterility (bit-exact identity in fp32/bf16, parameter matching, corrupted-init rejection) · causality (permutation tests, every mechanism incl. cumulative forget) · theorems (identity, strict inclusion witness, isometry & group action, envelope endpoints under saturation, non-vanishing gradients) · training (one-step parity from shared init, gradient flow to every *active* param, frozen *inactive* params, NaN-robustness at extreme weights, grad-checkpointing equivalence) · backends (SDPA ↔ manual parity; SDPA refuses to silently drop active score biases) · metric ground truth (interference = 0 for orthogonal heads, = self for identical heads; rank-1 collapse detection) · generation (greedy determinism, padded-vocab never sampled, context cropping) · data & trainer (determinism, sharding without duplicates, exact-suffix resume, tiny-dataset loud failure, LR schedule endpoints) · ablation tooling (single-factor discipline, shared-init pairing, structural-flag uniformity).
-
-CI runs the full suite plus three audits (config values, config pair sterility, repository sterility) on every push — warnings are treated as errors.
+Sterility (bit-exact identity in fp32/bf16, parameter matching, corrupted-init rejection) · causality (permutation tests, every mechanism incl. cumulative forget) · theorems (identity, strict-inclusion witness, isometry & group action, envelope endpoints under saturation, non-vanishing gradients) · training (one-step parity from shared init, gradient flow to every *active* param, frozen *inactive* params, NaN-robustness at extreme weights, grad-checkpointing equivalence) · backends (SDPA ↔ manual parity; SDPA refuses to silently drop active score biases) · metric ground truth (interference = 0 for orthogonal heads, = self for identical heads; rank-1 collapse detection) · generation (greedy determinism, padded-vocab never sampled, context cropping) · data & trainer (determinism, sharding without duplicates, exact-suffix resume, tiny-dataset loud failure, LR schedule endpoints) · ablation tooling (single-factor discipline, shared-init pairing, structural-flag uniformity).
 
 ## Status & roadmap
 
