@@ -6,7 +6,7 @@
 
 **A drop-in attention mechanism that separates *finding* tokens from *transmitting* them —<br>starting as a bit-exact standard Transformer and learning how much separation it needs.**
 
-[![tests](https://github.com/fanat503/Laplace-attention/actions/workflows/tests.yml/badge.svg)](https://github.com/fanat503/Laplace-attention/actions/workflows/tests.yml) [![Sterile](https://img.shields.io/badge/comparisons-bit--exact%20sterile-blueviolet)](#sterile-by-construction) [![Theory](https://img.shields.io/badge/theory-5%20verified%20theorems-blue)](HLA-v5/docs/THEORY.md) [![Metrics](https://img.shields.io/badge/metrics-documented-blue)](HLA-v5/docs/METRICS.md) [![PyTorch](https://img.shields.io/badge/PyTorch-2.x%20%7C%20XLA%2FTPU-orange)](HLA-v5/requirements.txt) [![License](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
+[![tests](https://github.com/fanat503/Laplace-attention/actions/workflows/tests.yml/badge.svg)](https://github.com/fanat503/Laplace-attention/actions/workflows/tests.yml) [![Sterile](https://img.shields.io/badge/comparisons-bit--exact%20sterile-blueviolet)](#sterile-by-construction) [![Theory](https://img.shields.io/badge/theory-5%20verified%20theorems-blue)](HLA-v5/docs/THEORY.md) [![Metrics](https://img.shields.io/badge/metrics-documented-blue)](HLA-v5/docs/METRICS.md) [![PyTorch](https://img.shields.io/badge/PyTorch-2.x%20%7C%20XLA%2FTPU-orange)](HLA-v5/requirements.txt) [![License](https://img.shields.io/badge/license-Apache--2.0-lightgrey)](LICENSE)
 
 [The problem](#the-problem) · [The idea](#the-idea) · [One formula](#one-formula-six-mechanisms) · [Mechanisms](#the-mechanisms) · [Sterility](#sterile-by-construction) · [Diagnostics](#measure-everything) · [Quick start](#quick-start) · [Layout](#repository-layout) · [Roadmap](#status--roadmap) · [FAQ](#faq)
 
@@ -289,6 +289,6 @@ Because the infrastructure makes cheating structurally hard: same initial weight
 **Independent research** by a 13-year-old researcher · mentorship & compute from a multimodal-ML collaborator
 Contributions, replications, and compute support welcome — open an issue.
 
-**MIT License** · [`CITATION.cff`](CITATION.cff)
+**Apache-2.0 License** · [`CITATION.cff`](CITATION.cff)
 
 </div>
