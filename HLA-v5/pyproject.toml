@@ -4,7 +4,7 @@ version = "5.0.0"
 description = "Holographic Laplace Attention: decoupling retrieval from content transmission in softmax attention, with a sterile comparison harness"
 readme = "../README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = { text = "Apache-2.0" }
 dependencies = [
     "torch>=2.4,<2.13",
     "numpy>=1.26,<3.0",

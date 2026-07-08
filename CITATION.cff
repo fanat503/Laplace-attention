@@ -10,7 +10,7 @@ authors:
   - family-names: "Slyatski"
     given-names: "Ilya"
 repository-code: "https://github.com/fanat503/Laplace-attention"
-license: MIT
+license: Apache-2.0
 keywords:
   - transformer
   - attention mechanism
