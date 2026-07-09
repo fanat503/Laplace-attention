@@ -1,6 +1,6 @@
 <div align="center">
 
-# HLA · Hierarchical Laplace Attention
+# HLA · Holographic Laplace Attention
 
 ### What if attention heads didn't have to whisper and listen through the same wire?
 
