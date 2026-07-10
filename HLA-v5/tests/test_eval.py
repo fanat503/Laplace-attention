@@ -33,6 +33,9 @@ from src.eval import (  # noqa: E402
     measure_attention_entropy,
     phase_statistics,
     svd_statistics,
+    perturbation_bounds,
+    per_layer_gate_analysis,
+    mechanism_gradient_statistics,
 )
 from src.model import GPT, GPTConfig  # noqa: E402
 
@@ -235,3 +238,202 @@ class TestStatistics:
         # identity init => mix must be exactly 1
         assert abs(stats["mix_k_mean"] - 1.0) < 1e-6
         assert abs(stats["mix_v_mean"] - 1.0) < 1e-6
+
+
+class TestPerturbationBounds:
+    def _hla(self):
+        cfg = GPTConfig(block_size=64, vocab_size=256, n_layer=2, n_head=2,
+                        n_embd=32, gradient_checkpointing=False,
+                        phase_mult=0.15, use_laplace=True, laplace_alpha=1.0)
+        return GPT(cfg)
+
+    def test_actual_within_theoretical(self):
+        """Core Theorem-4 check: captured mix never exceeds the envelope,
+        even with saturated gates."""
+        m = self._hla()
+        with torch.no_grad():
+            for blk in m.transformer.h:
+                blk.attn.W_gate_k.weight.normal_(0, 100.0)  # saturate
+                blk.attn.W_range_k.normal_(0, 100.0)
+        out = perturbation_bounds(m)
+        for i in range(2):
+            assert out[f"L{i:02d}_mix_k_max"] <= out[f"L{i:02d}_theo_mix_k_max"] + 1e-4
+            assert out[f"L{i:02d}_mix_k_min"] >= out[f"L{i:02d}_theo_mix_k_min"] - 1e-4
+            assert 0.0 <= out[f"L{i:02d}_util_k_up"] <= 1.0 + 1e-6
+
+    def test_saturated_gates_reach_utilization_one(self):
+        m = self._hla()
+        with torch.no_grad():
+            for blk in m.transformer.h:
+                blk.attn.W_gate_k.weight.fill_(1000.0)
+                blk.attn.W_range_k.fill_(1000.0)
+        out = perturbation_bounds(m)
+        assert out["L00_util_k_up"] > 0.99, "saturation must reach the envelope"
+
+    def test_identity_init_dormant(self):
+        out = perturbation_bounds(self._hla())
+        assert abs(out["L00_util_k_up"]) < 1e-6, "identity init must show ~0 utilization"
+
+    def test_restores_model_state(self):
+        m = self._hla().train()
+        perturbation_bounds(m)
+        assert m.training
+        assert m.transformer.h[0].attn.capture_diagnostics is False
+
+
+class TestPerLayerGateAnalysis:
+    def test_per_layer_keys_and_depth_scaling(self):
+        cfg = GPTConfig(block_size=64, vocab_size=256, n_layer=4, n_head=2,
+                        n_embd=32, gradient_checkpointing=False,
+                        phase_mult=0.15, use_laplace=True, laplace_alpha=1.0,
+                        layer_dependent_gate=True)
+        m = GPT(cfg)
+        with torch.no_grad():
+            for blk in m.transformer.h:
+                blk.attn.W_gate_k.weight.fill_(1000.0)
+        out = per_layer_gate_analysis(m)
+        for i in range(4):
+            assert f"L{i:02d}_mix_k_mean" in out
+            assert f"L{i:02d}_attn_entropy" in out
+        # deeper layer => wider envelope => larger mix at saturation
+        assert out["L03_mix_k_mean"] > out["L00_mix_k_mean"]
+
+
+class TestMechanismGradientStatistics:
+    def test_active_nonzero_inactive_zero_and_summary(self):
+        cfg = GPTConfig(block_size=64, vocab_size=256, n_layer=2, n_head=2,
+                        n_embd=32, gradient_checkpointing=False,
+                        phase_mult=0.15, use_laplace=True, laplace_alpha=1.0,
+                        use_salience_bias=True, salience_alpha=0.0)  # salience OFF
+        m = GPT(cfg)
+        x = torch.randint(0, 256, (2, 32))
+        _, loss = m(x, x)
+        loss.backward()
+        m.capture_mechanism_grad_norms()
+        out = mechanism_gradient_statistics(m)
+        assert out["L00_grad_phase_q"] > 0.0, "active mechanism must have gradient (Theorem 5)"
+        assert out["L00_grad_gate_sal"] == 0.0, "inactive mechanism must record exact 0"
+        assert out["mech_grad_min"] > 0.0, "summary must exclude inactive zeros"
+
+    def test_empty_before_capture(self):
+        cfg = GPTConfig(block_size=64, vocab_size=256, n_layer=1, n_head=2,
+                        n_embd=32, gradient_checkpointing=False)
+        assert mechanism_gradient_statistics(GPT(cfg)) == {}
+
+
+class TestProbeNonInterference:
+    """Review attack R-E: probes and captures must NEVER alter training.
+
+    Sterility invariant I5 extends to instrumentation: enabling metrics
+    cannot change the trajectory by a single bit."""
+
+    def test_grad_capture_does_not_change_weights(self):
+        cfg = GPTConfig(block_size=32, vocab_size=128, n_layer=1, n_head=2,
+                        n_embd=16, gradient_checkpointing=False, phase_mult=0.15)
+
+        def train3(capture):
+            torch.manual_seed(0)
+            m = GPT(cfg)
+            opt = torch.optim.AdamW(m.parameters(), lr=1e-3)
+            torch.manual_seed(1)
+            for _ in range(3):
+                x = torch.randint(0, 128, (2, 16))
+                _, l = m(x, x)
+                l.backward()
+                opt.step()
+                if capture:
+                    m.capture_mechanism_grad_norms()
+                opt.zero_grad(set_to_none=True)
+            return [p.detach().clone() for p in m.parameters()]
+
+        pa, pb = train3(False), train3(True)
+        assert all(torch.equal(a, b) for a, b in zip(pa, pb)), \
+            "grad capture altered the training trajectory!"
+
+    def test_perturbation_bounds_does_not_change_weights(self):
+        cfg = GPTConfig(block_size=32, vocab_size=128, n_layer=1, n_head=2,
+                        n_embd=16, gradient_checkpointing=False,
+                        use_laplace=True, laplace_alpha=1.0)
+        m = GPT(cfg)
+        before = [p.detach().clone() for p in m.parameters()]
+        perturbation_bounds(m)
+        after = list(m.parameters())
+        assert all(torch.equal(a, b) for a, b in zip(before, after))
+
+    def test_captured_norms_survive_zero_grad(self):
+        """R-C: snapshot must be a copy, not a view of .grad."""
+        cfg = GPTConfig(block_size=32, vocab_size=128, n_layer=1, n_head=2,
+                        n_embd=16, gradient_checkpointing=False, phase_mult=0.15)
+        m = GPT(cfg)
+        x = torch.randint(0, 128, (2, 16))
+        _, loss = m(x, x)
+        loss.backward()
+        m.capture_mechanism_grad_norms()
+        v1 = float(m.transformer.h[0].attn.last_mechanism_grad_norms["phase_q"])
+        for p in m.parameters():
+            p.grad = None
+        v2 = float(m.transformer.h[0].attn.last_mechanism_grad_norms["phase_q"])
+        assert v1 == v2 and v1 > 0.0
+
+
+class TestProbeEdgeCases:
+    """Review attack R-A/R-G: probes under unusual but legal configs."""
+
+    def test_bounds_track_learned_layer_temp(self):
+        """R-A: with theta != 0 the envelope must use the LIVE lambda."""
+        cfg = GPTConfig(block_size=64, vocab_size=256, n_layer=2, n_head=2,
+                        n_embd=32, gradient_checkpointing=False,
+                        use_laplace=True, laplace_alpha=1.0,
+                        layer_dependent_gate=True, learnable_layer_temp=True)
+        m = GPT(cfg)
+        with torch.no_grad():
+            for blk in m.transformer.h:
+                blk.attn.W_gate_k.weight.fill_(1000.0)
+                blk.attn.W_range_k.fill_(1000.0)
+                blk.attn.W_layer_temp.fill_(2.0)  # learned, non-default
+        out = perturbation_bounds(m)
+        assert out["L01_util_k_up"] > 0.99, \
+            "envelope must track live softplus(theta), not the static heuristic"
+        assert out["L01_mix_k_max"] <= out["L01_theo_mix_k_max"] + 1e-4
+
+    def test_bounds_empty_when_laplace_off(self):
+        cfg = GPTConfig(block_size=32, vocab_size=128, n_layer=1, n_head=2,
+                        n_embd=16, gradient_checkpointing=False, use_laplace=False)
+        assert perturbation_bounds(GPT(cfg)) == {}
+
+    def test_per_layer_analysis_no_crash_minimal_model(self):
+        cfg = GPTConfig(block_size=32, vocab_size=128, n_layer=1, n_head=2,
+                        n_embd=16, gradient_checkpointing=False, use_laplace=False)
+        out = per_layer_gate_analysis(GPT(cfg))
+        assert "L00_attn_entropy" in out
+
+
+class TestProbeStateRestoration:
+    """Review attack P1: probes must restore the CALLER's diagnostics state,
+    not blindly reset it."""
+
+    def test_perturbation_bounds_restores_enabled_diagnostics(self):
+        cfg = GPTConfig(block_size=32, vocab_size=128, n_layer=1, n_head=2,
+                        n_embd=16, gradient_checkpointing=False,
+                        use_laplace=True, laplace_alpha=1.0)
+        m = GPT(cfg)
+        m.set_diagnostics(enabled=True, capture_attention=True)
+        perturbation_bounds(m)
+        assert m.transformer.h[0].attn.capture_diagnostics is True
+        assert m.transformer.h[0].attn.capture_attention is True
+
+    def test_perturbation_bounds_restores_disabled_diagnostics(self):
+        cfg = GPTConfig(block_size=32, vocab_size=128, n_layer=1, n_head=2,
+                        n_embd=16, gradient_checkpointing=False,
+                        use_laplace=True, laplace_alpha=1.0)
+        m = GPT(cfg)
+        perturbation_bounds(m)
+        assert m.transformer.h[0].attn.capture_diagnostics is False
+
+    def test_per_layer_analysis_restores_state(self):
+        cfg = GPTConfig(block_size=32, vocab_size=128, n_layer=1, n_head=2,
+                        n_embd=16, gradient_checkpointing=False)
+        m = GPT(cfg)
+        m.set_diagnostics(enabled=True)
+        per_layer_gate_analysis(m)
+        assert m.transformer.h[0].attn.capture_diagnostics is True

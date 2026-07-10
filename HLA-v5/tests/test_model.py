@@ -871,3 +871,39 @@ class TestConfigValidation:
     def test_invalid_configs_rejected(self, bad):
         with pytest.raises(ValueError):
             small_cfg(**bad)
+
+
+class TestForgetGateNumerics:
+    """Review attack N2: cumulative sum precision at long context."""
+
+    def test_cumsum_computed_in_fp32_even_for_bf16_model(self):
+        """S_t ~ 200 at T=2048; bf16 ulp there (~0.78) swallows 0.1-steps.
+        Direct check: the captured forget-bias statistic of a bf16 model must
+        match its fp32 twin closely - possible only if cumsum runs upcast
+        (a bf16 cumsum would lose late steps entirely near |S| ~ 200)."""
+        cfg = small_cfg(block_size=2048, use_forget_gate=True, forget_alpha=1.0)
+        torch.manual_seed(0)
+        m32 = GPT(cfg).eval()
+        with torch.no_grad():
+            for blk in m32.transformer.h:
+                blk.attn.W_gate_f.weight.normal_(0, 0.05)
+        m16 = GPT(cfg).eval()
+        m16.load_state_dict(m32.state_dict(), strict=True)
+        m16 = m16.to(torch.bfloat16)
+        for m in (m32, m16):
+            m.set_diagnostics(enabled=True)
+        x = torch.randint(0, 256, (1, 2048))
+        m32(x)
+        m16(x)
+        b32 = float(m32.transformer.h[0].attn.last_forget_bias_abs_mean)
+        b16 = float(m16.transformer.h[0].attn.last_forget_bias_abs_mean)
+        assert b32 > 0.0
+        # bf16 inputs to the gate differ slightly (embeddings are bf16), so we
+        # allow a loose 25% band - a bf16 cumsum would be off by orders.
+        assert abs(b16 - b32) / b32 < 0.25, f"fp32={b32}, bf16={b16}"
+
+    def test_bf16_ulp_premise(self):
+        """Documents WHY the fp32 upcast is load-bearing (the attack itself)."""
+        big = torch.tensor(204.8, dtype=torch.bfloat16)
+        step = torch.tensor(0.1, dtype=torch.bfloat16)
+        assert bool((big + step) == big), "premise: bf16 swallows 0.1 near 200"
