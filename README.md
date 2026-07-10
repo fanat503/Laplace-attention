@@ -158,7 +158,7 @@ cd Laplace-attention/HLA-v5
 pip install -r requirements.txt             # torch (CPU is enough), numpy, pytest
 
 # 0 · Trust nothing, verify (always, before any TPU time)
-python -m pytest tests/ -q                  # → 162 passed
+python -m pytest tests/ -q                  # → 188 passed
 python scripts/audit_sterility.py           # → STERILITY AUDIT PASSED
 
 # 1 · Sterility gate + numeric sanity audit for the config pair
@@ -199,7 +199,7 @@ python src/train_xla.py --config configs/200m_hla_s42.json \
 ```
 Laplace-attention/
 ├── README.md · LICENSE · CITATION.cff · CONTRIBUTING.md · .gitignore
-├── .github/workflows/tests.yml     # CI: 162 tests + 3 audits on every push/PR, warnings-as-errors
+├── .github/workflows/tests.yml     # CI: 188 tests + 3 audits on every push/PR, warnings-as-errors
 ├── HLA-v4/                         # archived predecessor (3 files; identity-init bug fixed retroactively)
 │       make_init.py · modal_app.py · train1.py
 └── HLA-v5/                         # ← current version, all development here
@@ -230,7 +230,7 @@ Laplace-attention/
     │   ├── METRICS.md              #   exact math of every logged metric
     │   ├── EXPERIMENT_CARD.md      #   pre-registered hypotheses, run ladder, exclusion rules
     │   └── DATA_CARD.md            #   corpus, tokenizer, processing guarantees
-    ├── tests/                      # 7 files · 162 tests · CPU-only, ~7 s
+    ├── tests/                      # 7 files · 188 tests · CPU-only, ~7 s
     │   ├── test_model.py           #   73 · mechanisms, sterility, causality, bf16, generate
     │   ├── test_train_utils.py     #   24 · LR schedule, sharded samplers, config compat, optimizer groups
     │   ├── test_eval.py            #   19 · probes with ground-truth witnesses
@@ -241,14 +241,14 @@ Laplace-attention/
     ├── requirements.txt · pyproject.toml
 ```
 
-## 162 tests = the paper's claims, executable
+## 188 tests = the paper's claims, executable
 
 Sterility (bit-exact identity in fp32/bf16, parameter matching, corrupted-init rejection) · causality (permutation tests, every mechanism incl. cumulative forget) · theorems (identity, strict-inclusion witness, isometry & group action, envelope endpoints under saturation, non-vanishing gradients) · training (one-step parity from shared init, gradient flow to every *active* param, frozen *inactive* params, NaN-robustness at extreme weights, grad-checkpointing equivalence) · backends (SDPA ↔ manual parity; SDPA refuses to silently drop active score biases) · metric ground truth (interference = 0 for orthogonal heads, = self for identical heads; rank-1 collapse detection) · generation (greedy determinism, padded-vocab never sampled, context cropping) · data & trainer (determinism, sharding without duplicates, exact-suffix resume, tiny-dataset loud failure, LR schedule endpoints) · ablation tooling (single-factor discipline, shared-init pairing, structural-flag uniformity).
 
 ## Status & roadmap
 
 - [x] v3/v4: −0.09 val-loss gap @ 100M (pre-sterile infrastructure; v4 identity-init bug found & fixed retroactively)
-- [x] v5 infrastructure: 6 mechanisms, sterility protocol, theory, diagnostics, 162 tests, CI
+- [x] v5 infrastructure: 6 mechanisms, sterility protocol, theory, diagnostics, 188 tests, CI
 - [x] Pre-registered experimental plan ([EXPERIMENT_CARD](HLA-v5/docs/EXPERIMENT_CARD.md))
 - [ ] Smoke + pilot @ Kaggle TPU v5e-8 ← **here**
 - [ ] 200M pairs (v1 soft & v2 aggressive recipes), seed 42 — reproduce the gap sterile
