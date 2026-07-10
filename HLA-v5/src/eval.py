@@ -474,6 +474,150 @@ def head_interference_statistics(
     }
 
 
+
+@torch.no_grad()
+def perturbation_bounds(model, device="cpu", seed: int = 42, batch_size: int = 2) -> Dict[str, float]:
+    """Actual gate modulation vs the Theorem-4 envelope, per layer.
+
+    Self-contained: runs its own diagnostics forward on deterministic random
+    tokens (same pattern as measure_attention_entropy), then compares captured
+    mix tensors against the analytic envelope.
+
+    CORRECT envelope (matches model forward and test_theory):
+        eff  = lam * min(alpha * range_base * 1.25, log_clip)
+        theo = (1 - beta) + beta * exp(+-eff)
+    (The clip alone is NOT the bound: in all shipped configs the pre-clip term
+    alpha*range*1.25 binds first - see audit_config_values E3.)
+
+    utilization ~ 0 => bounds loose / mechanism dormant;
+    utilization -> 1 => model pressing the envelope (widen ranges).
+    """
+    import math as _m
+    import torch.nn.functional as _F
+
+    was_training = model.training
+    # P1 fix (reviewer attack): remember the caller's diagnostics state and
+    # RESTORE it afterwards instead of blindly disabling - probes must be
+    # side-effect-free even w.r.t. instrumentation flags.
+    prev_diag = bool(model.transformer.h[0].attn.capture_diagnostics)
+    prev_attn = bool(model.transformer.h[0].attn.capture_attention)
+    model.eval()
+    model.set_diagnostics(enabled=True)
+    try:
+        T = min(256, model.config.block_size)
+        g = torch.Generator(device="cpu")
+        g.manual_seed(seed)
+        tokens = torch.randint(0, model.config.vocab_size, (batch_size, T), generator=g).to(device)
+        model(tokens)
+
+        out: Dict[str, float] = {}
+        for i, block in enumerate(model.transformer.h):
+            attn = block.attn
+            lam = float(attn.layer_gate_multiplier)
+            if getattr(attn, "layer_dependent_gate", False) and getattr(attn, "learnable_layer_temp", False):
+                depth = float(attn.layer_idx) / float(max(1, attn.n_layer))
+                lam = 1.0 + depth * float(
+                    _F.softplus(attn.W_layer_temp.detach().float())
+                ) / _m.log(2.0)
+
+            for side in ("k", "v"):
+                mix = getattr(attn, f"last_mix_{side}", None)
+                if mix is None:
+                    continue
+                mix = mix.detach().float()
+                alpha = float(attn.laplace_alpha)
+                rng = float(getattr(attn, f"laplace_range_{side}"))
+                clip = float(getattr(attn, f"{side}_log_clip"))
+                beta = float(getattr(attn, f"beta_{side}"))
+                eff = lam * min(alpha * rng * 1.25, clip)
+                theo_hi = (1 - beta) + beta * _m.exp(eff)
+                theo_lo = (1 - beta) + beta * _m.exp(-eff)
+                mx, mn = float(mix.max()), float(mix.min())
+                out[f"L{i:02d}_mix_{side}_max"] = mx
+                out[f"L{i:02d}_mix_{side}_min"] = mn
+                out[f"L{i:02d}_theo_mix_{side}_max"] = theo_hi
+                out[f"L{i:02d}_theo_mix_{side}_min"] = theo_lo
+                if theo_hi > 1.0 + 1e-12:
+                    out[f"L{i:02d}_util_{side}_up"] = (mx - 1.0) / (theo_hi - 1.0)
+                    out[f"L{i:02d}_util_{side}_down"] = (1.0 - mn) / (1.0 - theo_lo)
+        return out
+    finally:
+        model.set_diagnostics(enabled=prev_diag, capture_attention=prev_attn)
+        model.train(was_training)
+
+
+@torch.no_grad()
+def per_layer_gate_analysis(model, device="cpu", seed: int = 42, batch_size: int = 2) -> Dict[str, float]:
+    """Per-layer (not averaged) mechanism activity for the depth figure.
+
+    Self-contained diagnostics forward, then one row of scalars per layer:
+    does the learned depth profile match the 1 + l/L heuristic?
+    """
+    was_training = model.training
+    prev_diag = bool(model.transformer.h[0].attn.capture_diagnostics)
+    prev_attn = bool(model.transformer.h[0].attn.capture_attention)
+    model.eval()
+    model.set_diagnostics(enabled=True)
+    try:
+        T = min(256, model.config.block_size)
+        g = torch.Generator(device="cpu")
+        g.manual_seed(seed)
+        tokens = torch.randint(0, model.config.vocab_size, (batch_size, T), generator=g).to(device)
+        model(tokens)
+
+        out: Dict[str, float] = {}
+        fields = [
+            ("last_gate_k_abs_mean", "gate_k_abs_mean"),
+            ("last_gate_v_abs_mean", "gate_v_abs_mean"),
+            ("last_gate_k_sat_frac", "gate_k_sat_frac"),
+            ("last_gate_v_sat_frac", "gate_v_sat_frac"),
+            ("last_angle_q_abs_mean", "angle_q_abs_mean"),
+            ("last_angle_k_abs_mean", "angle_k_abs_mean"),
+            ("last_mix_k_mean", "mix_k_mean"),
+            ("last_mix_v_mean", "mix_v_mean"),
+            ("last_salience_bias_abs_mean", "salience_bias_abs_mean"),
+            ("last_forget_bias_abs_mean", "forget_bias_abs_mean"),
+        ]
+        for i, block in enumerate(model.transformer.h):
+            attn = block.attn
+            for src, dst in fields:
+                v = getattr(attn, src, None)
+                if v is not None:
+                    out[f"L{i:02d}_{dst}"] = float(v.detach().float().mean())
+            e = getattr(attn, "last_entropy", None)
+            if e is not None:
+                out[f"L{i:02d}_attn_entropy"] = float(e.detach().float().mean())
+        return out
+    finally:
+        model.set_diagnostics(enabled=prev_diag, capture_attention=prev_attn)
+        model.train(was_training)
+
+
+def mechanism_gradient_statistics(model) -> Dict[str, float]:
+    """Read gradient norms captured by GPT.capture_mechanism_grad_norms().
+
+    Theorem-5 verification during training: mechanism gradients must not
+    vanish. Returns per-layer per-param norms plus summary mean/min over
+    ACTIVE entries (inactive mechanisms record exact 0 and are excluded
+    from the summary so a disabled arm does not fake a vanishing gradient).
+    """
+    out: Dict[str, float] = {}
+    active: list = []
+    for i, block in enumerate(model.transformer.h):
+        norms = getattr(block.attn, "last_mechanism_grad_norms", None)
+        if not norms:
+            continue
+        for name, t in norms.items():
+            v = float(t.detach().cpu().item())
+            out[f"L{i:02d}_grad_{name}"] = v
+            if v > 0.0:
+                active.append(v)
+    if active:
+        out["mech_grad_mean"] = float(sum(active) / len(active))
+        out["mech_grad_min"] = float(min(active))
+    return out
+
+
 __all__ = [
     "evaluate_induction",
     "evaluate_distractor_induction",
@@ -483,4 +627,7 @@ __all__ = [
     "svd_statistics",
     "head_interference_statistics",
     "depth_profile_statistics",
+    "perturbation_bounds",
+    "per_layer_gate_analysis",
+    "mechanism_gradient_statistics",
 ]

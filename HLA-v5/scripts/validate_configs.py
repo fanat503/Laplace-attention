@@ -16,6 +16,14 @@ ALLOWED_MAIN_DIFFS = {
     "model.laplace_alpha",
     "model.distance_laplace_alpha",
     "model.salience_alpha",
+    "model.forget_alpha",
+    # Identity-at-init structural toggles: with their learned params at zero
+    # the forward pass is bit-identical to base (verified by tests), so they
+    # are treatment switches of the same class as the alphas above.
+    "model.layer_dependent_gate",
+    "model.learnable_layer_temp",
+    "model.per_head_phase",
+    "model.layer_dependent_phase",
     "model.baseline_type",
     # Free-text documentation; never affects the run.
     "_doc",

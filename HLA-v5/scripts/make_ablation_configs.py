@@ -24,6 +24,16 @@ Usage:
 
 Every emitted pair passes validate_configs.py by construction (only allowed
 keys differ). Emits a MANIFEST.json with the full matrix for bookkeeping.
+
+SHARED INIT (critical for paired statistics): all arms of one seed load the
+SAME checkpoint init_abl_s{seed}.pt. Create it ONCE per seed from the 'base'
+arm config (any arm works - structural flags are identical across arms, so
+the state_dict is strict-compatible; verified by tests):
+
+  python src/make_init.py --config <outdir>/abl_base_s{seed}.json \
+      --out /kaggle/working/inits/init_abl_s{seed}.pt
+
+The exact command per seed is also written into MANIFEST.json.
 """
 
 from __future__ import annotations
@@ -100,6 +110,20 @@ def make_arm(base: dict, hla: dict, arm: str, seed: int, outdir: str) -> tuple[s
         m["per_head_phase"] = True
         if m.get("layer_dependent_gate", False):
             m["layer_dependent_phase"] = True
+    elif arm in ("no_phase", "no_gates", "no_salience", "no_distance"):
+        # Leave-one-out: FULL recipe minus exactly one mechanism. Complements
+        # the single-factor arms - answers "is component X necessary?" while
+        # single arms answer "is X sufficient?".
+        for k in ZERO_KEYS:
+            if k in hm:
+                m[k] = hm[k]
+        drop = {
+            "no_phase": "phase_mult",
+            "no_gates": "laplace_alpha",
+            "no_salience": "salience_alpha",
+            "no_distance": "distance_laplace_alpha",
+        }[arm]
+        m[drop] = 0.0
     else:
         raise ValueError(f"unknown arm: {arm}")
 
@@ -119,7 +143,8 @@ def make_arm(base: dict, hla: dict, arm: str, seed: int, outdir: str) -> tuple[s
 
 
 ARMS = ["base", "phase", "gates", "salience", "distance", "forget",
-        "full", "full_temp", "full_headphase"]
+        "full", "full_temp", "full_headphase",
+        "no_phase", "no_gates", "no_salience", "no_distance"]
 
 
 def main() -> None:
@@ -133,7 +158,13 @@ def main() -> None:
 
     base, hla = load(args.base), load(args.hla)
     manifest = {"template_base": args.base, "template_hla": args.hla,
-                "seeds": args.seeds, "arms": args.arms, "configs": []}
+                "seeds": args.seeds, "arms": args.arms, "configs": [],
+                "init_commands": {
+                    str(seed): (
+                        f"python src/make_init.py --config {args.outdir}/abl_base_s{seed}.json "
+                        f"--out /kaggle/working/inits/init_abl_s{seed}.pt"
+                    ) for seed in args.seeds
+                }}
 
     for seed in args.seeds:
         for arm in args.arms:

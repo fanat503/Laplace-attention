@@ -129,3 +129,31 @@ So: the *heuristic provides the prior, θ_l learns how strongly each layer follo
 | Distance bias | ✓ via gate_k | ✓ via gate_k heads | ✓ layer multiplier |
 
 Both the gates *and* the phase are now depth-adaptive; the phase reuses the **same** layer multiplier (including the learned temperature) so depth behavior stays consistent across mechanisms and adds zero extra parameters.
+
+## 8. Perturbation-bound utilization (Theorem 4, live)
+
+`perturbation_bounds(model)` - post-hoc probe on any checkpoint.
+
+| Metric | Formula | Read |
+|---|---|---|
+| `L*_mix_k_max/min` | actual extremes of the captured K-mix tensor | must sit inside the envelope |
+| `L*_theo_mix_k_max/min` | (1-b) + b*exp(+-eff), eff = lam*min(alpha*range*1.25, clip) | Theorem-4 envelope. NOTE: the binding term is alpha*range*1.25, not the clip - in every shipped config the clip has >=1.2x slack (audit E3) |
+| `L*_util_k_up/down` | (max-1)/(theo_max-1) and (1-min)/(1-theo_min), in [0,1] | ~0 = dormant/loose; ->1 = pressing the envelope, widen ranges |
+
+With `learnable_layer_temp` the effective lam is read from the live
+softplus(theta) value, so the bound tracks the learned depth profile.
+
+## 9. Mechanism gradient norms (Theorem 5, live)
+
+Captured in-training at `svd_every` cadence: `GPT.capture_mechanism_grad_norms()`
+snapshots ||grad W||_2 for all 11 mechanism parameters per layer AFTER
+cross-replica reduction and clipping, BEFORE zero_grad (device tensors, no
+host sync at capture time).
+
+| Metric | Formula | Read |
+|---|---|---|
+| `L*_grad_{name}` | per-layer, per-param L2 norm | inactive mechanisms record exact 0 (grad is None) |
+| `mech_grad_mean/min` (CSV) | mean/min over ACTIVE (>0) entries | a sustained slide of `mech_grad_min` toward 0 while train loss still moves = a mechanism is going silent; cross-check its `*_sat_frac` |
+
+No target band is prescribed: mechanism/backbone gradient ratios depend on
+parameter counts and layer depth; the paper reports trajectories, not thresholds.

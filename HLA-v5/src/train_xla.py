@@ -101,6 +101,11 @@ except Exception:  # pragma: no cover
     evaluate_distractor_induction = None
     depth_profile_statistics = None
 
+try:  # Optional: Theorem-5 gradient-norm readout (captured at svd cadence).
+    from src.eval import mechanism_gradient_statistics  # type: ignore  # noqa: E402
+except Exception:  # pragma: no cover
+    mechanism_gradient_statistics = None
+
 
 # =============================================================================
 # Process / XLA helpers
@@ -979,6 +984,15 @@ def master_extra_metrics(
                 master_print(f"[Interference] computed in {time.time() - t0:.1f}s")
             except Exception as e:
                 master_print(f"[WARN] head_interference_statistics failed: {e}")
+
+        if with_svd and mechanism_gradient_statistics is not None:
+            try:
+                mg = mechanism_gradient_statistics(model)
+                for k in ("mech_grad_mean", "mech_grad_min"):
+                    if k in mg:
+                        metrics[k] = float(mg[k])
+            except Exception as e:
+                master_print(f"[WARN] mechanism_gradient_statistics failed: {e}")
     finally:
         model.train(was_training)
     return metrics
@@ -1037,6 +1051,8 @@ def open_csv(save_dir: str, run_name: str, config: Dict[str, Any], param_report:
             "distractor_margin",
             "layer_temp_last",
             "phase_budget_mean",
+            "mech_grad_mean",
+            "mech_grad_min",
         ])
     else:
         writer.writerow([])
@@ -1355,9 +1371,17 @@ def _train_worker_fn(index: int, config: Dict[str, Any]) -> None:
                 )
             nonfinite_micro_t = torch.tensor(0.0, device=device)
 
+            # Theorem-5 evidence: snapshot mechanism grad norms at svd cadence
+            # (post-reduce+clip, pre-zero). Device tensors only - no host sync.
+            _next = completed_step + 1
+            want_grad_capture = svd_every > 0 and (
+                _next % svd_every == 0 or _next >= max_steps
+            )
             grad_norm_t = optimizer_step_with_reduced_clip(
                 model=model, optimizer=optimizer, grad_clip=grad_clip, device=device
             )
+            if want_grad_capture and hasattr(model, "capture_mechanism_grad_norms"):
+                model.capture_mechanism_grad_norms()
             optimizer.zero_grad(set_to_none=True)
             mark_step()
 
@@ -1485,6 +1509,8 @@ def _train_worker_fn(index: int, config: Dict[str, Any]) -> None:
                         fmt(metrics.get("distractor_margin", float("nan"))),
                         fmt(metrics.get("layer_temp_last", float("nan"))),
                         fmt(metrics.get("phase_budget_mean", float("nan"))),
+                        fmt(metrics.get("mech_grad_mean", float("nan"))),
+                        fmt(metrics.get("mech_grad_min", float("nan"))),
                     ])
                     csv_file.flush()
                     master_print(
