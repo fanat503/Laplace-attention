@@ -203,6 +203,10 @@ class CausalSelfAttention(nn.Module):
         nn.init.constant_(self.W_gate_sal.weight, 0.0)
         nn.init.constant_(self.W_gate_f.weight, 0.0)
 
+        # Memory note (reviewer attack K3): this (block,block) bool buffer is
+        # allocated per layer even on the sdpa path (which ignores it) - e.g.
+        # 24 layers x 2048^2 = ~101 MB. Acceptable for our manual-path-primary
+        # design; revisit with a shared/global mask if sdpa becomes primary.
         self.register_buffer(
             "mask",
             torch.tril(torch.ones(config.block_size, config.block_size, dtype=torch.bool)).view(
@@ -244,6 +248,9 @@ class CausalSelfAttention(nn.Module):
         self.last_salience_sat_frac: Optional[torch.Tensor] = None
         self.last_forget_bias_abs_mean: Optional[torch.Tensor] = None
         self.last_forget_sat_frac: Optional[torch.Tensor] = None
+        # Post-backward snapshot of mechanism gradient norms (Theorem 5
+        # verification during training). Filled by capture_mechanism_grad_norms.
+        self.last_mechanism_grad_norms: Optional[Dict[str, torch.Tensor]] = None
 
     def reset_hla_identity(self) -> None:
         """Reset HLA-specific parameters to the exact identity state."""
@@ -259,6 +266,38 @@ class CausalSelfAttention(nn.Module):
             self.W_range_f.zero_()
             self.W_layer_temp.zero_()
             self.W_phase_scale.zero_()
+
+    def capture_mechanism_grad_norms(self) -> None:
+        """Snapshot L2 gradient norms of ALL mechanism parameters.
+
+        Call AFTER gradients are reduced (post optimizer_step_with_reduced_clip's
+        reduce) and BEFORE optimizer.zero_grad(). Stores detached device tensors
+        (no .item() here - keeps XLA host-sync free); convert on master at
+        logging cadence via eval.mechanism_gradient_statistics.
+        Inactive mechanisms have grad None -> recorded as exact 0.
+        """
+        with torch.no_grad():
+            norms: Dict[str, torch.Tensor] = {}
+            for name, p in [
+                ("phase_q", self.W_phase_q),
+                ("phase_k", self.W_phase_k),
+                ("phase_scale", self.W_phase_scale),
+                ("range_k", self.W_range_k),
+                ("range_v", self.W_range_v),
+                ("range_f", self.W_range_f),
+                ("gate_k", self.W_gate_k.weight),
+                ("gate_v", self.W_gate_v.weight),
+                ("gate_sal", self.W_gate_sal.weight),
+                ("gate_f", self.W_gate_f.weight),
+                ("layer_temp", self.W_layer_temp),
+            ]:
+                g = p.grad
+                norms[name] = (
+                    g.detach().float().norm()
+                    if g is not None
+                    else torch.zeros((), device=p.device)
+                )
+            self.last_mechanism_grad_norms = norms
 
     @staticmethod
     def _rotate_pairwise(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
@@ -503,6 +542,13 @@ class CausalSelfAttention(nn.Module):
             # S_t = cumsum of per-token log-forget; bias_ij = S_i - S_j is the
             # total gate "mass" between key j and query i. Causal mask below
             # removes j > i, so only past-directed biases survive.
+            # NUMERICAL NOTE (reviewer attack N2): S_t grows as O(T*range).
+            # At T=2048, range=0.1 the running sum reaches ~200; in bf16 the
+            # ulp near 200 is ~0.78, so individual steps of 0.1 would be LOST
+            # (204.8 + 0.1 == 204.8 in bf16). The .float() below is therefore
+            # load-bearing, not cosmetic. WARNING for TPU: XLA_USE_BF16=1
+            # downcasts float32 to bf16 globally and silently breaks this;
+            # use XLA_DOWNCAST_BF16 or keep fp32 enabled for forget-gate runs.
             gate_f = torch.tanh(self.W_gate_f(x)).float()          # (B, T, H)
             range_f = (self.forget_range * (1.0 + 0.25 * torch.tanh(self.W_range_f.float()))).view(1, 1, self.n_head)
             log_f = self.forget_alpha * gate_f * range_f            # (B, T, H)
@@ -793,6 +839,14 @@ class GPT(nn.Module):
         Minimal by design (no KV-cache): correctness over speed, suitable for
         lm-eval-harness-style scoring and small demos. Crops context to
         block_size; never samples padded-vocab ids (they are masked out).
+
+        NOTE (forget gate): when the prompt exceeds block_size, the context is
+        cropped and the forget-gate cumulative sum S_t restarts from the window
+        start - the gate then measures accumulated forgetting WITHIN the
+        visible window, not since sequence begin. This matches training (which
+        never sees beyond block_size) but differs from a hypothetical
+        infinite-memory reading; documented to avoid surprise in long
+        generation loops.
         """
         was_training = self.training
         self.eval()
@@ -844,6 +898,11 @@ class GPT(nn.Module):
             ]:
                 err = max(err, float(tensor.detach().float().abs().max().cpu().item()))
         return err
+
+    def capture_mechanism_grad_norms(self) -> None:
+        """Snapshot mechanism gradient norms in every attention block."""
+        for block in self.transformer.h:
+            block.attn.capture_mechanism_grad_norms()
 
     def parameter_count(self) -> int:
         return sum(p.numel() for p in self.parameters())
