@@ -7,6 +7,30 @@ cannot. Every numbered claim marked ✓ is additionally verified numerically in
 
 ---
 
+## 0. On the name "holographic" (for the skeptical reviewer)
+
+The name is a *structural analogy*, claimed precisely and nothing more. In
+optical holography the recorded interference pattern stores information in
+RELATIVE PHASE, while intensity (magnitude) carries the illumination; readout
+works by phase alignment of a reference beam. HLA's retrieval scores have the
+same decomposition property: writing q = |q|e^{i\theta_q}, k = |k|e^{i\theta_k}
+per rotation plane, the score factorizes into a magnitude part |q||k| (scaled
+by the gates m_j) and an alignment part cos(\theta_q - \theta_k + \delta_{ij})
+that the phase mechanism controls WITHOUT touching magnitudes (Theorem 3:
+R is an isometry). Retrieval information is thus encoded in learned relative
+phase; content volume travels in magnitudes through u_j v_j.
+
+What we do NOT claim: no wave optics, no complex-valued network (the
+implementation is real-valued rotation pairs), no connection to holographic
+reduced representations beyond the shared phase-binding intuition (Plate,
+1995, is acknowledged as the closest conceptual ancestor: binding via
+circular convolution is phase addition in Fourier space, and our
+content-conditioned rotations perform learned phase addition per plane).
+If the reader prefers, every occurrence of "holographic" may be mentally
+replaced by "phase-magnitude decoupled" with zero loss of technical content;
+we keep the name because it names the design principle - information in
+alignment, not amplitude - in one word.
+
 ## 1. The unified HLA attention formula
 
 Standard attention (per head, causal):
