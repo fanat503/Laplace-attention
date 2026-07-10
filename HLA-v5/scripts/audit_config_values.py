@@ -144,7 +144,13 @@ def audit(path: str) -> dict:
         else:
             report("WARN", "E8", f"worst-layer K amplification x{k_max:.2f} > 3: deep-layer scores may saturate softmax", counters)
 
-    # --- E9/E10: trainer knobs (all configs) ---
+    # --- E9/E10: trainer knobs. Smoke/pilot runs (<= 1000 steps) exist to
+    # exercise infrastructure, not to train: their lr/warmup are deliberately
+    # unrepresentative, and flagging them on every audit run teaches people
+    # to ignore WARNs (alarm fatigue - reviewer attack N9). Skip with a note.
+    if int(cfg.get("max_steps", 0)) <= 1000:
+        print("  NOTE E9/E10 skipped: smoke/pilot profile (max_steps <= 1000)")
+        return counters
     lr, C = float(cfg.get("lr", 0)), int(m.get("n_embd", 0))
     if lr and C:
         prod = lr * C

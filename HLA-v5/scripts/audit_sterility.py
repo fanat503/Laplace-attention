@@ -37,6 +37,7 @@ REQUIRED_FILES = [
     "scripts/compare_inits.py",
     "scripts/inspect_checkpoint.py",
     "scripts/make_ablation_configs.py",
+    "scripts/plot_divergence.py",
     "scripts/make_dummy_data.py",
     "scripts/make_plots.py",
     "scripts/prepare_c4_data.py",
@@ -173,6 +174,10 @@ def check_main_configs() -> None:
         "model.distance_laplace_alpha",
         "model.salience_alpha",
         "model.forget_alpha",
+        "model.layer_dependent_gate",
+        "model.learnable_layer_temp",
+        "model.per_head_phase",
+        "model.layer_dependent_phase",
         "model.baseline_type",
     }
     base = __import__("json").loads(read("configs/800m_base_s42.json"))
