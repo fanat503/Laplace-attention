@@ -1,18 +1,26 @@
-# Core (tests, init generation, analysis - CPU is enough)
-# Pin ranges chosen for reproducibility; exact versions recorded per-run in
-# environment.json by the trainer.
-torch>=2.4,<2.15
-numpy>=1.26,<3.0
+[project]
+name = "hla"
+version = "5.4.0"
+description = "Holographic Laplace Attention: decoupling retrieval from content transmission in softmax attention, with a sterile comparison harness"
+# NOTE: no `readme` key on purpose - the README lives at the repository root,
+# one level above this package dir, and setuptools cannot reference ../ paths.
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Slyatski Ilya" }]
+urls = { Repository = "https://github.com/fanat503/Laplace-attention" }
+dependencies = [
+    "torch>=2.4,<2.15",
+    "numpy>=1.26,<3.0",
+]
 
-# Dev / CI
-pytest>=8.0
-pyflakes>=3.2
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pyflakes>=3.2"]
+data = ["datasets>=2.19", "tiktoken>=0.6", "tqdm>=4.66"]
+# TPU: install torch_xla matching your torch version (see requirements.txt)
 
-# TPU training (Kaggle v5e-8 / TRC). Install the torch_xla matching your torch:
-#   pip install torch~=2.5.0 torch_xla[tpu]~=2.5.0 \
-#     -f https://storage.googleapis.com/libtpu-releases/index.html
-# torch_xla  # (uncomment on TPU hosts only)
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q -W error::UserWarning"
 
-# Data preparation
-# datasets>=2.19   # (only for prepare_c4_data.py)
-# tiktoken>=0.6    # (tokenizer used in data prep)
+[tool.setuptools]
+packages = ["src"]
