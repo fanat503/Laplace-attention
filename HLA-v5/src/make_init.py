@@ -97,6 +97,8 @@ HLA_KEY_PATTERNS = (
     re.compile(r"\.W_gate_v\.weight$"),
     re.compile(r"\.W_gate_sal\.weight$"),
     re.compile(r"\.W_gate_f\.weight$"),
+    re.compile(r"\.W_gate_d\.weight$"),
+    re.compile(r"\.W_qtemp\.weight$"),
     re.compile(r"\.W_range_f$"),
     re.compile(r"\.W_layer_temp$"),
     re.compile(r"\.W_phase_scale$"),
@@ -135,6 +137,7 @@ HLA_PARAMS_MUST_BE_ZERO = frozenset({
     "W_phase_q", "W_phase_k",
     "W_range_k", "W_range_v",
     "W_gate_k", "W_gate_v", "W_gate_sal", "W_gate_f", "W_range_f",
+    "W_gate_d", "W_qtemp",
     "W_layer_temp", "W_phase_scale",
 })
 
