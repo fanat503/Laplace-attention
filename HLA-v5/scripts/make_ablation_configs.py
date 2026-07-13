@@ -50,6 +50,7 @@ ZERO_KEYS = {
     "distance_laplace_alpha": 0.0,
     "salience_alpha": 0.0,
     "forget_alpha": 0.0,
+    "qtemp_alpha": 0.0,
 }
 
 
@@ -75,7 +76,7 @@ def make_arm(base: dict, hla: dict, arm: str, seed: int, outdir: str) -> tuple[s
     for k, v in ZERO_KEYS.items():
         m[k] = v
     # make sure structural flags exist so params match across all arms
-    for k in ("use_laplace", "use_distance_laplace", "use_salience_bias", "use_forget_gate"):
+    for k in ("use_laplace", "use_distance_laplace", "use_salience_bias", "use_forget_gate", "use_qtemp"):
         m[k] = True
 
     if arm == "base":
@@ -93,6 +94,9 @@ def make_arm(base: dict, hla: dict, arm: str, seed: int, outdir: str) -> tuple[s
     elif arm == "forget":
         m["use_forget_gate"] = True
         m["forget_alpha"] = 1.0
+    elif arm == "qtemp":
+        m["use_qtemp"] = True
+        m["qtemp_alpha"] = 1.0
     elif arm == "full":
         for k in ZERO_KEYS:
             if k in hm:
@@ -142,7 +146,7 @@ def make_arm(base: dict, hla: dict, arm: str, seed: int, outdir: str) -> tuple[s
     return name, cfg
 
 
-ARMS = ["base", "phase", "gates", "salience", "distance", "forget",
+ARMS = ["base", "phase", "gates", "salience", "distance", "forget", "qtemp",
         "full", "full_temp", "full_headphase",
         "no_phase", "no_gates", "no_salience", "no_distance"]
 

@@ -160,6 +160,8 @@ def hla_statistics(model) -> Dict[str, float]:
         "distance_bias_mean": [],
         "distance_bias_abs_mean": [],
         "angle_q_sat_frac": [],
+        "angle_q_std": [],
+        "angle_k_std": [],
         "angle_k_sat_frac": [],
         "gate_k_sat_frac": [],
         "gate_k_abs_mean": [],
@@ -169,6 +171,8 @@ def hla_statistics(model) -> Dict[str, float]:
         "salience_sat_frac": [],
         "forget_bias_abs_mean": [],
         "forget_sat_frac": [],
+        "qtemp_mean": [],
+        "qtemp_sat_frac": [],
     }
     for block in model.transformer.h:
         attn = block.attn
@@ -183,6 +187,8 @@ def hla_statistics(model) -> Dict[str, float]:
             "distance_bias_mean": getattr(attn, "last_distance_bias_mean", None),
             "distance_bias_abs_mean": getattr(attn, "last_distance_bias_abs_mean", None),
             "angle_q_sat_frac": getattr(attn, "last_angle_q_sat_frac", None),
+            "angle_q_std": getattr(attn, "last_angle_q_std", None),
+            "angle_k_std": getattr(attn, "last_angle_k_std", None),
             "angle_k_sat_frac": getattr(attn, "last_angle_k_sat_frac", None),
             "gate_k_sat_frac": getattr(attn, "last_gate_k_sat_frac", None),
             "gate_k_abs_mean": getattr(attn, "last_gate_k_abs_mean", None),
@@ -192,6 +198,8 @@ def hla_statistics(model) -> Dict[str, float]:
             "salience_sat_frac": getattr(attn, "last_salience_sat_frac", None),
             "forget_bias_abs_mean": getattr(attn, "last_forget_bias_abs_mean", None),
             "forget_sat_frac": getattr(attn, "last_forget_sat_frac", None),
+            "qtemp_mean": getattr(attn, "last_qtemp_mean", None),
+            "qtemp_sat_frac": getattr(attn, "last_qtemp_sat_frac", None),
         }
         for k, v in mapping.items():
             if v is not None:
@@ -484,10 +492,13 @@ def perturbation_bounds(model, device="cpu", seed: int = 42, batch_size: int = 2
     mix tensors against the analytic envelope.
 
     CORRECT envelope (matches model forward and test_theory):
-        eff  = lam * min(alpha * range_base * 1.25, log_clip)
+        eff  = lam * min(alpha * range_base * (1 + range_flex), log_clip)
         theo = (1 - beta) + beta * exp(+-eff)
+    range_flex is read from the model (config knob; 0.25 default -> the
+    historical 1.25 factor). Hardcoding 1.25 here was a bug: with
+    range_flex != 0.25 the probe would report a silently wrong envelope.
     (The clip alone is NOT the bound: in all shipped configs the pre-clip term
-    alpha*range*1.25 binds first - see audit_config_values E3.)
+    alpha*range*(1+range_flex) binds first - see audit_config_values E3.)
 
     utilization ~ 0 => bounds loose / mechanism dormant;
     utilization -> 1 => model pressing the envelope (widen ranges).
@@ -529,7 +540,8 @@ def perturbation_bounds(model, device="cpu", seed: int = 42, batch_size: int = 2
                 rng = float(getattr(attn, f"laplace_range_{side}"))
                 clip = float(getattr(attn, f"{side}_log_clip"))
                 beta = float(getattr(attn, f"beta_{side}"))
-                eff = lam * min(alpha * rng * 1.25, clip)
+                flex = 1.0 + float(getattr(attn, "range_flex", 0.25))
+                eff = lam * min(alpha * rng * flex, clip)
                 theo_hi = (1 - beta) + beta * _m.exp(eff)
                 theo_lo = (1 - beta) + beta * _m.exp(-eff)
                 mx, mn = float(mix.max()), float(mix.min())
@@ -618,6 +630,161 @@ def mechanism_gradient_statistics(model) -> Dict[str, float]:
     return out
 
 
+
+@torch.no_grad()
+def attention_head_similarity(model, device="cpu", seed: int = 42,
+                              batch_size: int = 2) -> Dict[str, float]:
+    """ACTIVATION-space head redundancy (Nanda attack: weight-space overlap
+    only bounds POSSIBLE interference; circuits live in activations).
+
+    Runs a diagnostics forward with attention capture on deterministic random
+    tokens, then for every layer computes the mean pairwise Jensen-Shannon
+    divergence between the attention DISTRIBUTIONS of different heads on the
+    same queries.
+
+      head_js_mean ~ 0   => heads attend identically (redundant heads);
+      head_js_mean large => heads specialize.
+
+    The decoupling claim predicts HLA heads specialize MORE than base heads
+    (phase gives each head its own matching geometry) - this probe is the
+    activation-level counterpart of qk_interference and Figure material.
+    JS is used instead of KL for symmetry and boundedness (<= ln 2).
+    """
+    was_training = model.training
+    prev_diag = bool(model.transformer.h[0].attn.capture_diagnostics)
+    prev_attn = bool(model.transformer.h[0].attn.capture_attention)
+    model.eval()
+    model.set_diagnostics(enabled=True, capture_attention=True)
+    try:
+        T = min(128, model.config.block_size)
+        g = torch.Generator(device="cpu")
+        g.manual_seed(seed)
+        tokens = torch.randint(0, model.config.vocab_size, (batch_size, T), generator=g).to(device)
+        model(tokens)
+
+        out: Dict[str, float] = {}
+        eps = 1e-9
+        per_layer: list = []
+        for i, block in enumerate(model.transformer.h):
+            att = getattr(block.attn, "last_attn", None)
+            if att is None:
+                continue
+            att = att.detach().float().clamp_min(eps)   # (B, H, T, T)
+            B, H, Tq, Tk = att.shape
+            js_vals = []
+            for a in range(H):
+                for b in range(a + 1, H):
+                    p, q = att[:, a], att[:, b]
+                    m = 0.5 * (p + q)
+                    js = 0.5 * (p * (p / m).log()).sum(-1) + 0.5 * (q * (q / m).log()).sum(-1)
+                    js_vals.append(js.mean())
+            if js_vals:
+                v = float(torch.stack(js_vals).mean())
+                out[f"L{i:02d}_head_js"] = v
+                per_layer.append(v)
+        if per_layer:
+            out["head_js_mean"] = float(sum(per_layer) / len(per_layer))
+        return out
+    finally:
+        model.set_diagnostics(enabled=prev_diag, capture_attention=prev_attn)
+        model.train(was_training)
+
+
+
+@torch.no_grad()
+def mechanism_knockout(model, batch, targets, mechanisms=("phase", "gates", "salience", "distance", "forget", "qtemp")) -> Dict[str, float]:
+    """Causal attribution by inference-time knockout (Nanda-style ablation).
+
+    MEASUREMENT TOOL ONLY - never a deployment/generation mode. The mechanisms
+    exist precisely to help at inference (e.g. long-context quality); this
+    probe temporarily silences one on a HELD-OUT batch to MEASURE how much
+    trained load it carries, then restores it bit-exactly (verified by test).
+    Expected paper finding: ko_*_delta GROWS with context length for the
+    long-range mechanisms (distance/forget/salience) - that growth curve IS
+    the quantitative evidence for the long-context claim, which is exactly
+    why one measures by silencing. delta > 0 => mechanism carries load;
+    delta ~ 0 => decorative or redundantly encoded.
+    Complements training-time ablation arms: arms answer "what if never
+    trained with X"; knockout answers "what does X do in THIS trained model".
+    """
+    knobs = {
+        "phase": "phase_mult",
+        "gates": "laplace_alpha",
+        "salience": "salience_alpha",
+        "distance": "distance_laplace_alpha",
+        "forget": "forget_alpha",
+        "qtemp": "qtemp_alpha",
+    }
+    was_training = model.training
+    model.eval()
+    try:
+        _, base_loss = model(batch, targets)
+        out: Dict[str, float] = {"loss_full": float(base_loss)}
+        for mech in mechanisms:
+            attr = knobs[mech]
+            saved = [getattr(blk.attn, attr) for blk in model.transformer.h]
+            if all(v == 0.0 for v in saved):
+                out[f"ko_{mech}_delta"] = 0.0  # mechanism not present
+                continue
+            for blk in model.transformer.h:
+                setattr(blk.attn, attr, 0.0)
+            _, ko_loss = model(batch, targets)
+            for blk, v in zip(model.transformer.h, saved):
+                setattr(blk.attn, attr, v)
+            out[f"ko_{mech}_delta"] = float(ko_loss) - float(base_loss)
+        return out
+    finally:
+        model.train(was_training)
+
+
+@torch.no_grad()
+def prefix_matching_score(model, device="cpu", seed: int = 42, batch_size: int = 4) -> Dict[str, float]:
+    """Canonical induction-head detector (Olsson et al. 2022): attention from
+    the second [A] back to the token AFTER the first [A].
+
+    Our evaluate_induction measures BEHAVIOR (P(B) at the output); this
+    measures the MECHANISM (attention pattern), per head. A head with high
+    prefix-matching is an induction head structurally, regardless of whether
+    the logit lands. Returns per-layer max/mean over heads + global max -
+    the standard way to report emergence of induction circuitry.
+    """
+    was_training = model.training
+    prev_diag = bool(model.transformer.h[0].attn.capture_diagnostics)
+    prev_attn = bool(model.transformer.h[0].attn.capture_attention)
+    model.eval()
+    model.set_diagnostics(enabled=True, capture_attention=True)
+    try:
+        T = min(256, model.config.block_size)
+        if T < 16 or model.config.vocab_size < 20000:
+            return {}
+        g = torch.Generator(device="cpu")
+        g.manual_seed(seed)
+        tokens = torch.randint(100, min(20000, model.config.vocab_size - 1),
+                               (batch_size, T), generator=g)
+        i = torch.arange(batch_size)
+        pos_a1, pos_a2 = T // 3, (2 * T) // 3
+        tokens[:, pos_a1] = INDUCTION_TOK_A_OFFSET + i
+        tokens[:, pos_a2] = INDUCTION_TOK_A_OFFSET + i
+        model(tokens.to(device))
+
+        out: Dict[str, float] = {}
+        gmax = 0.0
+        for li, block in enumerate(model.transformer.h):
+            att = getattr(block.attn, "last_attn", None)
+            if att is None:
+                continue
+            # attention from query pos_a2 to key pos_a1+1 ("token after first A")
+            score = att[:, :, pos_a2, pos_a1 + 1].float().mean(dim=0)  # (H,)
+            out[f"L{li:02d}_prefix_match_max"] = float(score.max())
+            out[f"L{li:02d}_prefix_match_mean"] = float(score.mean())
+            gmax = max(gmax, float(score.max()))
+        out["prefix_match_global_max"] = gmax
+        return out
+    finally:
+        model.set_diagnostics(enabled=prev_diag, capture_attention=prev_attn)
+        model.train(was_training)
+
+
 __all__ = [
     "evaluate_induction",
     "evaluate_distractor_induction",
@@ -630,4 +797,7 @@ __all__ = [
     "perturbation_bounds",
     "per_layer_gate_analysis",
     "mechanism_gradient_statistics",
+    "attention_head_similarity",
+    "mechanism_knockout",
+    "prefix_matching_score",
 ]

@@ -17,6 +17,7 @@ ALLOWED_MAIN_DIFFS = {
     "model.distance_laplace_alpha",
     "model.salience_alpha",
     "model.forget_alpha",
+    "model.qtemp_alpha",
     # Identity-at-init structural toggles: with their learned params at zero
     # the forward pass is bit-identical to base (verified by tests), so they
     # are treatment switches of the same class as the alphas above.

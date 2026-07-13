@@ -64,6 +64,9 @@ def load_checkpoint_model(ckpt_path: str, config_path: str | None, device: str) 
 
 
 def iter_val_batches(cfg: Dict[str, Any], *, seq_len: int, batch_size: int, max_batches: int, device: str):
+    # Clamp to the dataset block: requesting more than block_size would
+    # silently yield shorter chunks and desync downstream shape assumptions.
+    seq_len = min(int(seq_len), int(cfg["model"]["block_size"]))
     ds = FixedDataset(
         cfg["val_path"],
         cfg["model"]["block_size"],
@@ -132,7 +135,12 @@ def attention_and_hook_metrics(model: GPT, cfg: Dict[str, Any], *, seq_len: int,
         for x, _ in iter_val_batches(cfg, seq_len=seq_len, batch_size=batch_size, max_batches=batches, device=device):
             _ = model(x)
             count += 1
-            denom = torch.log(torch.arange(1, seq_len + 1, device=device, dtype=torch.float32).clamp_min(2))
+            # Use the ACTUAL sequence length of this batch: when the dataset
+            # block is shorter than --seq-len, entropy tensors are (B,H,T_actual)
+            # and a denom built from the requested length shape-mismatches
+            # (silent-shape bug found in the final review sweep).
+            t_actual = x.size(1)
+            denom = torch.log(torch.arange(1, t_actual + 1, device=device, dtype=torch.float32).clamp_min(2))
             for li, block in enumerate(model.transformer.h):
                 attn = block.attn.last_attn
                 if attn is None:
