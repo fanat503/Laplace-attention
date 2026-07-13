@@ -180,3 +180,158 @@ class TestTheorem5FirstOrderSignal:
         z = torch.zeros(5, requires_grad=True)
         torch.tanh(z).sum().backward()
         assert torch.allclose(z.grad, torch.ones(5))
+
+
+class TestTheorem6GaugeInvariance:
+    """LeCun attack: what IS the geometry? Answer: score depends only on
+    relative phase phi - theta; common shifts are unobservable (gauge)."""
+
+    def test_common_phase_shift_cancels(self):
+        model = GPT(cfg(**ALL_ON)).eval()
+        attn = model.transformer.h[0].attn
+        q = torch.randn(1, 2, 4, attn.head_dim)
+        k = torch.randn(1, 2, 4, attn.head_dim)
+        th = torch.rand(1, 2, 4, attn.head_dim // 2) * 2.0
+        ph = torch.rand(1, 2, 4, attn.head_dim // 2) * 2.0
+        c = torch.rand(1) * 3.14
+
+        def score(t, p):
+            qr = attn._rotate_pairwise(q, torch.cos(t), torch.sin(t))
+            kr = attn._rotate_pairwise(k, torch.cos(p), torch.sin(p))
+            return (qr * kr).sum(-1)
+
+        s1 = score(th, ph)
+        s2 = score(th + c, ph + c)
+        assert torch.allclose(s1, s2, atol=1e-5), "gauge invariance violated"
+
+    def test_relative_phase_form(self):
+        """R(th)q . R(ph)k == q . R(ph-th)k - the canonical relative form."""
+        model = GPT(cfg(**ALL_ON)).eval()
+        attn = model.transformer.h[0].attn
+        q = torch.randn(1, 2, 4, attn.head_dim)
+        k = torch.randn(1, 2, 4, attn.head_dim)
+        th = torch.rand(1, 2, 4, attn.head_dim // 2)
+        ph = torch.rand(1, 2, 4, attn.head_dim // 2)
+        qr = attn._rotate_pairwise(q, torch.cos(th), torch.sin(th))
+        kr = attn._rotate_pairwise(k, torch.cos(ph), torch.sin(ph))
+        lhs = (qr * kr).sum(-1)
+        krel = attn._rotate_pairwise(k, torch.cos(ph - th), torch.sin(ph - th))
+        rhs = (q * krel).sum(-1)
+        assert torch.allclose(lhs, rhs, atol=1e-5)
+
+
+class TestTheorem1bGradientIdentity:
+    """Sutskever attack: identity must hold for GRADIENTS too - the first
+    optimizer step of HLA moves the backbone exactly as base does."""
+
+    def test_backbone_gradients_bit_identical(self):
+        torch.manual_seed(0)
+        base = GPT(cfg(**ALL_OFF))
+        hla = GPT(cfg(**ALL_ON))
+        hla.load_state_dict(base.state_dict(), strict=True)
+        hla.reset_hla_identity()
+        x = torch.randint(0, 256, (2, 32))
+        _, lb = base(x, x)
+        lb.backward()
+        _, lh = hla(x, x)
+        lh.backward()
+        for (nb, pb), (nh, ph) in zip(base.named_parameters(), hla.named_parameters()):
+            if pb.grad is None:
+                continue
+            assert torch.equal(pb.grad, ph.grad), f"gradient mismatch at {nb}"
+
+
+class TestTheorem7PositionShift:
+    """Phase == content-conditioned RoPE position displacement (per plane)."""
+
+    def test_rope_phase_composition_is_single_rotation(self):
+        model = GPT(cfg(**ALL_ON)).eval()
+        attn = model.transformer.h[0].attn
+        q = torch.randn(1, 2, 8, attn.head_dim)
+        pos = torch.rand(1, 1, 8, attn.head_dim // 2) * 2.0     # RoPE angles
+        theta = torch.rand(1, 2, 8, attn.head_dim // 2) * 2.0   # content phase
+        seq = attn._rotate_pairwise(
+            attn._rotate_pairwise(q, torch.cos(pos), torch.sin(pos)),
+            torch.cos(theta), torch.sin(theta))
+        one = attn._rotate_pairwise(q, torch.cos(pos + theta), torch.sin(pos + theta))
+        assert torch.allclose(seq, one, atol=1e-5), "RoPE∘Phase must equal R(pos+theta)"
+
+    def test_phase_equals_shifted_rope_position(self):
+        """Explicit displacement form: R_phase(theta)R_rope(w*p) q == R_rope(w*(p+delta)) q
+        with delta = theta/w - the positional reading of the mechanism."""
+        model = GPT(cfg(**ALL_ON)).eval()
+        attn = model.transformer.h[0].attn
+        q = torch.randn(1, 2, 8, attn.head_dim)
+        w = torch.rand(attn.head_dim // 2) * 0.5 + 0.1          # per-plane freqs
+        p = 7.0
+        theta = torch.rand(attn.head_dim // 2)
+        delta = theta / w
+        a = attn._rotate_pairwise(
+            attn._rotate_pairwise(q, torch.cos(w * p).expand(1, 2, 8, -1), torch.sin(w * p).expand(1, 2, 8, -1)),
+            torch.cos(theta).expand(1, 2, 8, -1), torch.sin(theta).expand(1, 2, 8, -1))
+        b = attn._rotate_pairwise(
+            q, torch.cos(w * (p + delta)).expand(1, 2, 8, -1), torch.sin(w * (p + delta)).expand(1, 2, 8, -1))
+        assert torch.allclose(a, b, atol=1e-4)
+
+
+class TestKVCacheCompatibility:
+    """Sutskever attack: incremental decoding viability. Every key-side
+    quantity must depend only on the prefix <= j => cacheable."""
+
+    def test_key_side_quantities_prefix_stable(self):
+        c = cfg(**ALL_ON)
+        model = GPT(c).eval()
+        with torch.no_grad():
+            for blk in model.transformer.h:
+                blk.attn.W_gate_k.weight.normal_(0, 0.3)
+                blk.attn.W_gate_sal.weight.normal_(0, 0.3)
+                blk.attn.W_gate_f.weight.normal_(0, 0.3)
+                blk.attn.W_phase_k.normal_(0, 0.3)
+        model.set_diagnostics(enabled=True)
+        x = torch.randint(0, 256, (1, 32))
+        model(x[:, :20])
+        mix_prefix = model.transformer.h[0].attn.last_mix_k[:, :, :20].clone()
+        model(x)
+        mix_full = model.transformer.h[0].attn.last_mix_k[:, :, :20]
+        assert torch.allclose(mix_prefix, mix_full, atol=1e-6), \
+            "K-gate must be prefix-causal (KV-cache compatible)"
+
+    def test_logits_prefix_stable(self):
+        """The decisive cache test: logits at position t computed from a
+        prefix equal logits at t from the full sequence."""
+        model = GPT(cfg(**ALL_ON)).eval()
+        with torch.no_grad():
+            for blk in model.transformer.h:
+                blk.attn.W_phase_q.normal_(0, 0.2)
+                blk.attn.W_gate_f.weight.normal_(0, 0.2)
+        x = torch.randint(0, 256, (1, 32))
+        l_prefix, _ = model(x[:, :20])
+        l_full, _ = model(x)
+        assert torch.allclose(l_prefix[0, 19], l_full[0, 19], atol=1e-5)
+
+
+class TestTheorem8PairingEquivalence:
+    """chunk (x_i, x_{i+d/2}) and interleaved (x_2i, x_2i+1) pairings are
+    isomorphic via a fixed coordinate permutation - implementation detail,
+    not a modeling choice."""
+
+    def test_chunk_equals_permuted_interleaved(self):
+        model = GPT(cfg(**ALL_ON)).eval()
+        attn = model.transformer.h[0].attn
+        hd = attn.head_dim
+        x = torch.randn(2, 3, 5, hd)
+        ang = torch.rand(2, 3, 5, hd // 2)
+
+        def rot_inter(z, cos, sin):
+            z1, z2 = z[..., 0::2], z[..., 1::2]
+            out = torch.empty_like(z)
+            out[..., 0::2] = z1 * cos - z2 * sin
+            out[..., 1::2] = z1 * sin + z2 * cos
+            return out
+
+        P = torch.empty(hd, dtype=torch.long)
+        P[0::2] = torch.arange(hd // 2)
+        P[1::2] = torch.arange(hd // 2) + hd // 2
+        r_chunk = attn._rotate_pairwise(x, torch.cos(ang), torch.sin(ang))
+        r_inter = rot_inter(x[..., P], torch.cos(ang), torch.sin(ang))
+        assert torch.equal(r_chunk, r_inter[..., torch.argsort(P)])

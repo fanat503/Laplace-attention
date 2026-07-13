@@ -40,11 +40,11 @@ Att(x)_i = Σ_{j≤i} softmax_j( q_i·k_j / √d ) · v_j
 ```
 
 **HLA replaces q, k, v by gated/rotated versions and adds a structured score
-bias.** One formula, all six mechanisms:
+bias.** One formula, all seven mechanisms:
 
 ```
-             ┌ retrieval geometry ┐   ┌── key salience ──┐
-score_ij  =  ( R(θ_i) q_i )  ·  ( m_j · R(φ_j) k_j )  / √d   +   B_ij
+             ┌──── retrieval geometry ────┐   ┌── key salience ──┐
+score_ij  =  ( τ_i · R(θ_i) q_i )  ·  ( m_j · R(φ_j) k_j )  / √d   +   B_ij
                                                     
 out_i     =  Σ_{j≤i}  softmax_j(score_ij)  ·  ( u_j · v_j )
                                               └ content volume ┘
@@ -60,7 +60,8 @@ with the components (all zero / identity at initialization):
 | u_j | (1−β_v) + β_v·exp(clamp(α·tanh(W_gv x_j)·r_v, ±c_v)) | V-gate | **1** |
 | B_ij | b^sal_j + b^dist_ij + (S_i − S_j) | additive biases | **0** |
 | b^sal_j | clamp(α_s·r_s·tanh(W_s x_j), ±c_s) | salience | 0 |
-| b^dist_ij | clamp(α_d·r_d·λ_l·d(i,j)·tanh(W_gk x_j), ±c_d) | distance | 0 |
+| b^dist_ij | clamp(α_d·r_d·λ_l·d(i,j)·tanh(W_gd x_j), ±c_d) — W_gd is distance's OWN gate (deconfounded from the K-gate) | distance | 0 |
+| τ_i | exp(clamp(α_q·r_q·tanh(W_qt x_i), ±c_q)) — per-query softmax temperature (SSA/SSMax family; the only non-no-op Q-side score form, since an additive per-query bias cancels in softmax) | Q-temp | **1** |
 | S_i − S_j | S_t = Σ_{τ≤t} α_f·r_f·tanh(W_f x_τ), clamped | forget (FoX-family) | 0 |
 | ρ_h | 1 + tanh(s_h) — per-head phase budget | head adaptivity | 1 |
 | λ_l | 1 + (l/L)·softplus(θ_l)/softplus(0) — depth profile | layer adaptivity | 1 + l/L (static) |
@@ -69,9 +70,10 @@ Where the base model is recovered by ρ, λ multipliers irrelevant because every
 learned input to them is zero. **Reading the formula**: R controls *where
 matching happens* (geometry), m and b^sal control *how loud each key is*
 (multiplicative with floor 1−β_k vs additive with no floor), B's distance and
-forget terms control *reach over positions*, u controls *how loud each
-message is*. Retrieval (everything inside softmax) and transmission (u_j·v_j)
-share no learned scalars — that is the decoupling, stated syntactically.
+forget terms control *reach over positions*, τ controls *how sharp each query
+listens* (per-query temperature), u controls *how loud each message is*.
+Retrieval (everything inside softmax) and transmission (u_j·v_j) share no
+learned scalars — that is the decoupling, stated syntactically.
 
 ---
 
@@ -125,6 +127,7 @@ governed by ‖q‖‖k‖·m_j/√d, so phase cannot cause score explosions.
 ### Theorem 4 (Bounded modulation envelopes). ✓ tested under saturation
 For all inputs and parameter values:
 m_j ∈ [(1−β_k)+β_k e^{−c_k·λ_l}, (1−β_k)+β_k e^{+c_k·λ_l}], analogously u_j;
+τ_i ∈ [e^{−c_q}, e^{+c_q}] (Q-temp clamp acts in log-space before exp);
 |b^sal| ≤ c_s; |b^dist| ≤ c_d·λ_l; |S_i−S_j| ≤ c_f.
 Total additive score perturbation is bounded by c_s + c_d·λ_l + c_f
 independent of sequence length.
@@ -134,7 +137,75 @@ clamp; exp is monotone, so the envelope endpoints are attained only at clamp
 boundaries. Sums of clamped terms are bounded by sums of the clamp radii. ∎
 Consequence: no input can drive HLA logits unboundedly far from base logits —
 finite-Lipschitz deviation with explicit constants (used in the NaN-robustness
-test with weights ×100).
+test with weights ×100). A useful reading: since m_j rescales key norms, the
+K-gate acts as a learned PER-KEY softmax temperature (bounded by the envelope);
+attention entropy, already logged every eval, is the direct observable of this
+effect.
+
+### Theorem 6 (Gauge invariance of phase matching). ✓ tested
+For any common phase shift c applied per rotation plane,
+score(θ_i + c, φ_j + c) = score(θ_i, φ_j): the retrieval score depends only on
+the RELATIVE phase φ_j − θ_i.
+
+*Proof.* Per plane, R(θ)q · R(φ)k = q^T R(θ)^T R(φ) k = q^T R(φ−θ) k by the
+group action (Theorem 3); adding c to both angles leaves φ−θ unchanged. ∎
+
+Consequence (canonical reading of the mechanism): HLA learns a per-token,
+per-head *relative phase code* — the absolute phase is unobservable, exactly
+as in physical holography where only phase DIFFERENCES against the reference
+beam carry information. This also means the mechanism has a gauge freedom:
+solutions differing by a common phase field are functionally identical, which
+should be remembered when comparing learned W_phase across seeds (compare
+score-level behavior, not raw phase weights).
+
+### Theorem 1b (Gradient identity at initialization). ✓ tested bit-exact
+At Θ₀ not only the outputs but the BACKBONE GRADIENTS of HLA and base are
+bit-identical: ∂L/∂θ_backbone(HLA, Θ₀) = ∂L/∂θ_backbone(base) exactly.
+
+*Proof sketch.* Every mechanism enters the computation graph multiplied by a
+function vanishing at Θ₀ with the mechanism weights (angles = tanh(Wx)·c with
+W=0 ⇒ angles ≡ 0 AND ∂angles/∂x = W^T·(...) = 0; the same argument for every
+gate). Hence the backward pass through the backbone is the identity graph's
+backward pass. ∎ Consequence: the first optimizer step of an HLA run moves the
+backbone EXACTLY as the base run does — divergence is driven solely by the
+mechanisms' own learning, never by a perturbed backbone signal. This is the
+strongest possible form of the "no cold start" guarantee.
+
+### Theorem 7 (Phase as a content-conditioned position shift). ✓ tested
+When RoPE and the content phase act on the same rotation planes,
+R_rope(w_c * p) . R_phase(theta) = R(w_c * p + theta) per plane c: the learned
+phase is algebraically EQUIVALENT to displacing the token's RoPE position by
+delta_c = theta_c / w_c (a per-plane, per-token, per-head learned offset).
+
+*Proof.* Immediate from the group action (Theorem 3): rotations about the same
+plane commute and compose additively. ∎
+
+Consequence: HLA-phase subsumes "content-dependent position" mechanisms (cf.
+CoPE) as a special case while remaining strictly more general - the shift
+delta_c may differ per plane (multi-scale, since RoPE frequencies w_c span
+octaves), which a scalar position shift cannot express. For the paper this
+gives a second, positional reading of the same mechanism: retrieval geometry
+(holographic reading, Theorem 6) == learned positional displacement field
+(positional reading, this theorem). Both are exact, not analogies.
+
+### Theorem 8 (Pairing-scheme equivalence). ✓ tested to 0.0
+The chunk pairing used here (plane i = coordinates (x_i, x_{i+d/2})) and the
+interleaved pairing of the original RoPE paper (plane i = (x_{2i}, x_{2i+1}))
+define ISOMORPHIC model classes: for the fixed permutation P mapping one
+layout to the other, rotate_chunk(x, θ) = P^{-1} rotate_inter(P x, θ) for all
+x, θ. Any interleaved-parameterized model equals a chunk-parameterized model
+whose adjacent weight matrices absorb P (a relabeling of rows/columns), and
+vice versa.
+
+*Proof.* Both schemes apply the same 2x2 rotation to disjoint coordinate
+pairs; P is exactly the bijection between the two pair layouts, and
+permutations commute with per-pair block-diagonal action up to relabeling. ∎
+
+Consequence: the choice is a pure implementation detail with ZERO effect on
+the function class, optimization landscape (AdamW is permutation-equivariant),
+or any result in this repository. We keep chunk pairing (contiguous-slice
+friendly on TPU; no checkpoint migration) and cite this theorem when asked
+"why not interleaved like the RoPE paper?".
 
 ### Theorem 5 (Non-vanishing first-order signal). ✓ tested
 At Θ₀ the loss gradient w.r.t. mechanism parameters is generically non-zero
