@@ -2,8 +2,7 @@
 
 # HLA · Holographic Laplace Attention
 
-**Separating *finding* tokens from *transmitting* them in softmax attention —
-starting as a bit-exact standard Transformer and learning how much separation it needs.**
+**Separating finding tokens from transmitting them in softmax attention**
 
 [![tests](https://github.com/fanat503/Laplace-attention/actions/workflows/tests.yml/badge.svg)](https://github.com/fanat503/Laplace-attention/actions/workflows/tests.yml)
 [![Theory](https://img.shields.io/badge/theory-9%20verified%20theorems-blue)](HLA-v5/docs/THEORY.md)
@@ -11,7 +10,7 @@ starting as a bit-exact standard Transformer and learning how much separation it
 
 </div>
 
-Every attention head does two unrelated jobs with one set of vectors: **retrieval** (which tokens matter — QK matching) and **transmission** (what they say — the V pathway). Because both share the residual stream, they interfere: one head's *output* lands in other heads' *retrieval* inputs as noise. HLA gives each job its own learned, bounded, per-head channel.
+Every attention head does two interconnected jobs with one set of vectors: **retrieval** (which tokens matter) and **transmission** (what they say). Because both share the residual stream, they interfere: one head's *output* lands in other heads' *retrieval* inputs as noise. HLA gives each job its own learned, channel.
 
 This repository contains:
 
@@ -19,7 +18,7 @@ This repository contains:
 2. **A sterile comparison harness** — base and HLA train from the *same initial weights* on the *same data in the same order*, with parameter matching and config validation enforced by tests;
 3. **Theory and diagnostics** — 9 numerically verified theorems ([`docs/THEORY.md`](HLA-v5/docs/THEORY.md)), causal knockout probes, interference and spectral metrics logged during training ([`docs/METRICS.md`](HLA-v5/docs/METRICS.md)).
 
-**Status**: infrastructure complete and tested; sterile-harness training runs (200M → 700M, Kaggle TPU v5e-8) are the current roadmap item. Earlier non-sterile iterations showed a −0.09 val-loss gap at 100M — reproducing that *inside* the harness is the first experiment, not a claim.
+**Status**: infrastructure complete and tested; sterile training runs are the current roadmap item. Earlier iterations showed a 0.09 validation loss gap at 100M — reproducing that inside the harness is the first experiment, not a claim.
 
 ## The idea in one formula
 
@@ -32,12 +31,12 @@ Phase carries *where to look*; magnitude carries *what is said* — like a holog
 
 | Component | Role | At init |
 |---|---|---|
-| `R(θ_i)`, `R(φ_j)` | content-conditioned rotation of Q/K — learned matching geometry, composes with RoPE | `I` |
-| `m_j`, `u_j` | multiplicative K/V gates: key loudness (floored) and content volume | `1` |
-| `B_ij` | additive biases: salience (unbounded suppression) + content-conditioned distance decay + FoX-style forget gate (baseline arm, off in HLA configs) | `0` |
-| `τ_i` | per-query softmax temperature (SSA-family) — how sharply each query listens | `1` |
+| `R(θ_i)`, `R(φ_j)` | content-conditioned rotation of Q, K — learned matching geometry, composes with RoPE | `I` |
+| `m_j`, `u_j` | multiplicative K, V gates: key loudness and content volume | `1` |
+| `B_ij` | additive biases: salience  + content-conditioned distance decay + FoX-style forget gate (baseline arm) | `0` |
+| `τ_i` | per-query softmax temperature — how sharply each query listens | `1` |
 
-Everything is per-head, tanh-bounded, causally safe, and **exactly zero at initialization**: an HLA model *is* a standard Transformer at step 0 (bit-exact in fp32 and bf16, verified), and any gain over the parameter-matched baseline is attributable to the mechanisms — not initialization luck, parameter count, or data order. Full derivation, envelopes, and proofs: [`docs/THEORY.md`](HLA-v5/docs/THEORY.md).
+Everything is per-head, tanh-bounded, causally safe, and **exactly zero at initialization**: an HLA model *is* a standard Transformer at step 0 (bit-exact in fp32 and bf16, verified). Full derivation, envelopes, and proofs: [`docs/THEORY.md`](HLA-v5/docs/THEORY.md).
 
 ## Getting started
 
@@ -72,19 +71,19 @@ python scripts/make_ablation_configs.py \
     --outdir configs/ablations_200m --seeds 42 43 44
 ```
 
-Recommended ladder before any long run: `smoke` (10 steps) → `pilot` (1 000) → full pairs. Config discipline and value sanity are enforced by `validate_configs.py` and `audit_config_values.py`; the experimental plan is pre-registered in [`docs/EXPERIMENT_CARD.md`](HLA-v5/docs/EXPERIMENT_CARD.md).
+Recommended ladder before any long run: `smoke` (10 steps), then `pilot` (1000) and then full pairs. Config discipline and value sanity are enforced by `validate_configs.py` and `audit_config_values.py`; We pre-registered our experimental design on [`docs/EXPERIMENT_CARD.md`](HLA-v5/docs/EXPERIMENT_CARD.md).
 
 ## Why trust the comparison
 
-The methodology is designed so that cheating is structurally hard, and each guarantee is an executable test rather than a promise — 229 tests total ([protocol & threat model](HLA-v5/docs/STERILITY.md)):
+The methodology is designed so that cheating is hard, and each guarantee is an executable test rather than a promise — 229 tests ([protocol & threat model](HLA-v5/docs/STERILITY.md)):
 
-- **Same start** — shared backbone weights (tensor-equal, verified), HLA params zeroed, bit-exact logits at init;
+- **Same start** — shared backbone weights (tensor-equal), HLA params zeroed, bit-exact logits at init;
 - **Same size** — every mechanism module exists in the base too (α = 0, frozen, counted);
 - **Same data** — deterministic fixed-token pipeline, fingerprints, even sharding, sample-exact resume;
 - **Same knobs** — config validator rejects any undeclared difference; hyperparameters tuned on base only; HLA params excluded from weight decay (zero *is* their identity state);
 - **Measured honestly** — parameter-matched *and* FLOPs-matched pairs; mechanism compute overhead ~7% at 200M, reported.
 
-Training logs include interference metrics (does retrieval get cleaner while composition survives?), distractor-induction margins, saturation fractions, spectral ranks, and per-mechanism gradient norms — the paper's figures come from the CSV, not post-hoc analysis. Checkpoint-time causal probes (mechanism knockout, prefix-matching scores) are in [`src/eval.py`](HLA-v5/src/eval.py).
+Training logs record interference metrics (specifically, whether retrieval clarity improves while compositional capabilities are preserved), distractor induction margins, saturation fractions, spectral ranks, and per-mechanism gradient norms. Crucially, the figures presented in this paper are generated directly from these raw CSV logs rather than via post-hoc analysis. Checkpoint level causal probes, including mechanism knockouts and prefix matching scores, are documented in [`src/eval.py`](HLA-v5/src/eval.py).
 
 ## Repository layout
 
@@ -106,19 +105,19 @@ HLA-v5/
 <details>
 <summary><b>Isn't this what PoPE did?</b></summary>
 
-Nearly the opposite. Both works identify the same object: a content-dependent phase term in the QK product that interferes with positional rotation. PoPE *deletes* it so position becomes clean; HLA *domesticates* it — learned, tanh-bounded, zero-initialized — as an extra retrieval coordinate, while RoPE keeps position. A directly testable disagreement.
+Almost the opposite. Both works identify the same object: a content-dependent phase term in the QK product that interferes with positional rotation. PoPE *deletes* it so position becomes clean; HLA *domesticates* it — learned, tanh-bounded, zero-initialized — as an extra retrieval coordinate, while RoPE keeps position.
 </details>
 
 <details>
 <summary><b>Why is a Forgetting-Transformer-style gate in the codebase?</b></summary>
 
-As a baseline, clearly credited (Lin et al., ICLR 2025), OFF in every HLA config, activated only by the `forget` ablation arm. Re-implementing a competitor inside the same controlled harness is the only way to compare fairly — and enables the `base | FoX-style | HLA` three-way comparison from one shared init.
+As a baseline, clearly credited (Lin et al., ICLR 2025), OFF in every HLA config, activated only by the `forget` ablation arm. Re-implementing a competitor inside the same controlled harness is the only way to compare fairly — and enables the `base | FoX-style | HLA` three-way comparison from one shared init. But don't I need another one?
 </details>
 
 <details>
 <summary><b>Why "holographic"?</b></summary>
 
-Retrieval information lives in learned *phase alignment* between Q and K (only φ−θ matters — gauge invariance, Theorem 6), while content travels in *magnitudes* through V. See THEORY.md §0 for the precise, non-mystical reading of the term.
+Retrieval information lives in learned *phase alignment* between Q and K, while content lives in *magnitudes* through V. See THEORY.md §0 for the precise, reading of the term.
 </details>
 
 ## Citation
