@@ -26,7 +26,7 @@ python scripts/check_dataloader.py --config "$HLA_CONFIG" --batches 4
 
 echo "[preflight] create shared-backbone init if missing"
 if [[ ! -f "$BASE_INIT" || ! -f "$HLA_INIT" ]]; then
-  python make_init.py \
+  python src/make_init.py \
     --shared-backbone \
     --base-config "$BASE_CONFIG" \
     --hla-config "$HLA_CONFIG" \

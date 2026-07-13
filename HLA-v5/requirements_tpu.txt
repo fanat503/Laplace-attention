@@ -1,0 +1,10 @@
+--find-links https://storage.googleapis.com/libtpu-releases/index.html
+
+# Exact TPU stack for Kaggle/TRC preflight validation.
+torch==2.5.1
+torch_xla[tpu]==2.5.1
+numpy==1.26.4
+
+# Dev / audit tools used by the preflight path.
+pytest==8.3.5
+pyflakes==3.2.0
