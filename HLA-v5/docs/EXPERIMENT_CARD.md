@@ -10,6 +10,10 @@ H1: The full HLA mechanism set (phase + K/V gates + salience + distance),
 trained from a sterile shared init against a parameter-matched ablated base,
 achieves lower validation loss at matched tokens, and the gap does not shrink
 with model scale over 200M -> 300M -> 700M.
+(The Q-temperature mechanism ships OFF in the primary HLA recipe; it is
+evaluated as its own single-factor arm `qtemp` in the ablation matrix and
+joins the full recipe only if that arm shows a positive effect — a
+pre-registered decision, not post-hoc selection.)
 
 Secondary (mechanistic) hypotheses:
 H2: qk_interference decreases vs base while ov_interference is preserved
@@ -23,7 +27,7 @@ H3: distractor_margin improves faster than base during training.
 | Primary metric | token-weighted final val loss; tie-breaker: val loss at matched wall-clock | |
 | Seeds | 42, 43, 44 (add 45, 46 if gap < 5x seed std) | seed-noise band measured at ~0.002 init loss |
 | Statistical test | paired t-test across seeds (same seed = same init pair) | paired by construction |
-| Ablation matrix | 9 arms x 3 seeds via `make_ablation_configs.py` | single-factor discipline enforced by tests |
+| Ablation matrix | 14 arms x 3 seeds via `make_ablation_configs.py` | single-factor discipline enforced by tests |
 | Hyperparameters | tuned on BASE only (standard recipes); never adjusted per-arm | fairness invariant I5 |
 | Exclusion rule | a run is excluded only for infrastructure failure (crash, data corruption), never for its result; exclusions logged here | |
 
@@ -32,7 +36,7 @@ H3: distractor_margin improves faster than base during training.
 2. pilot (1000 steps) — loss curves sane, diagnostics populated
 3. 200M v1 pair, seed 42 — reproduce the historical v3/v4 gap in the sterile harness
 4. 200M v2 pair, seed 42 — primary recipe first reading
-5. 200M ablation matrix (9 arms x 3 seeds)
+5. 200M ablation matrix (14 arms x 3 seeds)
 6. 300M FLOPs-matched pair (3 seeds)
 7. 700M pair (>= 2 seeds, budget permitting)
 8. Downstream evals (lm-eval-harness) on best checkpoints

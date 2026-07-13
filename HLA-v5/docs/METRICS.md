@@ -58,6 +58,13 @@ Every bounded nonlinearity in HLA is a `tanh`. For each one we log the fraction 
 | `angle_q_sat_frac`, `angle_k_sat_frac` | phase angles vs the π·phase_mult budget |
 | `gate_k_sat_frac`, `gate_v_sat_frac` | K/V gates vs the range envelope |
 | `salience_sat_frac` | salience gate vs ±salience_clip |
+| `forget_sat_frac` | forget gate vs ±forget_clip (FoX arm only) |
+| `qtemp_sat_frac` | Q-temperature gate vs ±qtemp_clip |
+
+Related non-saturation readouts: `angle_q_std` / `angle_k_std` (spread of the
+learned rotation angles — 0 at identity, growth = the phase channel actually
+differentiates tokens) and `qtemp_mean` (mean per-query temperature multiplier;
+1.0 at identity, drift ≠ 1 = queries learn individual sharpness).
 
 **Read**: ≈ 0 — the envelope is not the limiting factor (bounds are fine). Persistently > 0.1–0.2 — the model is pressing against the wall: widen `phase_mult` / ranges in the next run. This converts "did I limit the model too much?" from an opinion into a measurement.
 
@@ -126,7 +133,8 @@ So: the *heuristic provides the prior, θ_l learns how strongly each layer follo
 | Phase rotation | ✓ W_phase·x | ✓ per_head_phase (budget) | ✓ layer_dependent_phase (**new**) |
 | K/V Laplace gates | ✓ W_gate·x | ✓ W_range (learned range) | ✓ layer_dependent_gate (+ learnable_layer_temp) |
 | Salience bias | ✓ W_sal·x | ✓ H outputs of W_sal | — (deliberate: salience is "what", not "where in depth") |
-| Distance bias | ✓ via gate_k | ✓ via gate_k heads | ✓ layer multiplier |
+| Distance bias | ✓ via its own gate W_gate_d (deconfounded from the K-gate) | ✓ H outputs of W_gate_d | ✓ layer multiplier |
+| Q-temperature | ✓ W_qtemp·x (per query) | ✓ H outputs of W_qtemp | — |
 
 Both the gates *and* the phase are now depth-adaptive; the phase reuses the **same** layer multiplier (including the learned temperature) so depth behavior stays consistent across mechanisms and adds zero extra parameters.
 
@@ -146,7 +154,8 @@ softplus(theta) value, so the bound tracks the learned depth profile.
 ## 9. Mechanism gradient norms (Theorem 5, live)
 
 Captured in-training at `svd_every` cadence: `GPT.capture_mechanism_grad_norms()`
-snapshots ||grad W||_2 for all 11 mechanism parameters per layer AFTER
+snapshots ||grad W||_2 for all 13 mechanism parameters per layer (phase_q/k,
+phase_scale, range_k/v/f, gate_k/v/sal/f/d, qtemp, layer_temp) AFTER
 cross-replica reduction and clipping, BEFORE zero_grad (device tensors, no
 host sync at capture time).
 
@@ -157,3 +166,39 @@ host sync at capture time).
 
 No target band is prescribed: mechanism/backbone gradient ratios depend on
 parameter counts and layer depth; the paper reports trajectories, not thresholds.
+
+## 10. Post-hoc causal & circuit probes (checkpoint-time, not logged in CSV)
+
+All three are side-effect-free (verified by tests: weights, training mode and
+diagnostics flags are restored bit-exactly).
+
+### `mechanism_knockout(model, batch, targets)`
+
+Causal attribution by inference-time silencing (Nanda-style ablation).
+**Measurement tool only — never a deployment mode.** For each mechanism
+(phase, gates, salience, distance, forget, qtemp) it temporarily sets the
+alpha to 0 on a held-out batch, records `ko_<mech>_delta = loss_ko − loss_full`,
+then restores the alpha.
+
+- `delta > 0` — the mechanism carries trained load; `delta ≈ 0` — decorative
+  or redundantly encoded.
+- The **Δloss vs context-length curve** for the long-range mechanisms
+  (distance / salience / forget) is the quantitative evidence for the
+  long-context claim — that is precisely why one measures by silencing.
+- Complements the training-time ablation arms: arms answer *"what if never
+  trained with X"*; knockout answers *"what does X do in THIS trained model"*.
+
+### `prefix_matching_score(model)`
+
+Canonical induction-head detector (Olsson et al., 2022): attention weight
+from the second `[A]` back to the token AFTER the first `[A]`, per head.
+`induction` (§2) measures the *behavior* (P(B) at the output); this measures
+the *mechanism* (attention pattern). Reported per-layer max/mean over heads +
+global max — the standard way to chart emergence of induction circuitry.
+
+### `attention_head_similarity(model)`
+
+Mean pairwise Jensen–Shannon divergence between per-head attention
+distributions at matched positions (bounded by ln 2). Low JS = redundant
+heads attending alike; rising JS in the HLA run = heads differentiating —
+the attention-space counterpart of the weight-space interference metrics (§5).
