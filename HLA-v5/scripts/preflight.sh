@@ -13,7 +13,7 @@ echo "[preflight] static audit"
 python scripts/audit_sterility.py --root .
 
 echo "[preflight] environment check"
-python scripts/check_environment.py --requirements requirements_tpu.txt --require-xla
+python scripts/check_environment.py --requirements requirements.txt --require-xla
 
 echo "[preflight] config pair validation"
 python scripts/validate_configs.py --base "$BASE_CONFIG" --hla "$HLA_CONFIG"
@@ -26,7 +26,7 @@ python scripts/check_dataloader.py --config "$HLA_CONFIG" --batches 4
 
 echo "[preflight] create shared-backbone init if missing"
 if [[ ! -f "$BASE_INIT" || ! -f "$HLA_INIT" ]]; then
-  python make_init.py \
+  python src/make_init.py \
     --shared-backbone \
     --base-config "$BASE_CONFIG" \
     --hla-config "$HLA_CONFIG" \

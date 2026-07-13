@@ -21,10 +21,21 @@ This file intentionally preserves the logic of the provided HLA-v4 model:
     mechanism should be active — enforced in GPTConfig.__post_init__;
   - RMSNorm pre-norm blocks;
   - SwiGLU MLP with hidden_dim = round_up(8*n_embd/3, 64);
-  - content-conditioned pairwise phase rotation of Q/K;
-  - residual exponential K/V gating when `use_laplace and laplace_alpha != 0`;
-  - manual causal attention with a fixed causal mask;
+  - manual causal attention with a fixed causal mask (or SDPA fast path);
   - tied token embedding / LM head.
+
+HLA mechanisms (all identity-initialized, always created for parameter
+matching, activated by their alphas):
+  - content-conditioned pairwise phase rotation of Q/K (`phase_mult`);
+  - residual exponential K/V gating (`use_laplace` + `laplace_alpha`);
+  - additive per-key salience bias (`use_salience_bias` + `salience_alpha`);
+  - distance-aware Laplace bias with its OWN gate W_gate_d
+    (`use_distance_laplace` + `distance_laplace_alpha`);
+  - FoX-family cumulative forget gate — baseline arm, OFF in HLA configs
+    (`use_forget_gate` + `forget_alpha`);
+  - per-query softmax temperature, SSA-family (`use_qtemp` + `qtemp_alpha`);
+  - adaptivity axes: `per_head_phase`, `layer_dependent_gate`/`_phase`,
+    `learnable_layer_temp`, learned per-head ranges W_range_* (`range_flex`).
 
 The main improvements are engineering/sterility only:
   - valid Python, type hints, clearer errors;
@@ -144,6 +155,11 @@ class CausalSelfAttention(nn.Module):
         # FoX-style forgetting); positive g_t = token t keeps history alive.
         # This makes the FoX-hypothesis (cumulative decay helps) directly
         # testable inside the sterile harness as one more ablation arm.
+        self.use_qtemp = bool(getattr(config, "use_qtemp", False))
+        self.qtemp_alpha = float(getattr(config, "qtemp_alpha", 0.0))
+        self.qtemp_range = float(getattr(config, "qtemp_range", 0.5))
+        self.qtemp_clip = float(getattr(config, "qtemp_clip", 1.5))
+        self.range_flex = float(getattr(config, "range_flex", 0.25))
         self.use_forget_gate = bool(getattr(config, "use_forget_gate", False))
         self.forget_alpha = float(getattr(config, "forget_alpha", 0.0))
         self.forget_range = float(getattr(config, "forget_range", 0.1))
@@ -197,11 +213,25 @@ class CausalSelfAttention(nn.Module):
         # Forget gate params: same always-created pattern for param matching.
         self.W_gate_f = nn.Linear(config.n_embd, self.n_head, bias=False)
         self.W_range_f = nn.Parameter(torch.zeros(self.n_head))
+        # Distance gate: its OWN projection (deconfound fix). Previously the
+        # distance bias reused gate_k, entangling "suppress this key" with
+        # "shorten this key's reach" - one weight served two mechanisms and
+        # confounded single-factor ablations (a 'distance' arm trained W_gate_k).
+        # K/V gates correlate with distance behavior but are not it.
+        self.W_gate_d = nn.Linear(config.n_embd, self.n_head, bias=False)
+        # Q-side temperature (SSA-style, Selective Self-Attention NeurIPS'24):
+        # per-query learned sharpness. Scaling q_i by s>0 multiplies the WHOLE
+        # score row by s == softmax temperature 1/s. Additive per-query bias
+        # would be a no-op (softmax is shift-invariant per row) - multiplicative
+        # is the only correct form. Applied to q directly => SDPA-compatible.
+        self.W_qtemp = nn.Linear(config.n_embd, self.n_head, bias=False)
 
         nn.init.constant_(self.W_gate_k.weight, 0.0)
         nn.init.constant_(self.W_gate_v.weight, 0.0)
         nn.init.constant_(self.W_gate_sal.weight, 0.0)
         nn.init.constant_(self.W_gate_f.weight, 0.0)
+        nn.init.constant_(self.W_gate_d.weight, 0.0)
+        nn.init.constant_(self.W_qtemp.weight, 0.0)
 
         # Memory note (reviewer attack K3): this (block,block) bool buffer is
         # allocated per layer even on the sdpa path (which ignores it) - e.g.
@@ -225,6 +255,8 @@ class CausalSelfAttention(nn.Module):
         # Persistently high values = the bound is too tight (raise it);
         # near-zero values = the bound is not the limiting factor.
         self.last_angle_q_sat_frac: Optional[torch.Tensor] = None
+        self.last_angle_q_std: Optional[torch.Tensor] = None
+        self.last_angle_k_std: Optional[torch.Tensor] = None
         self.last_angle_k_sat_frac: Optional[torch.Tensor] = None
         self.last_gate_k_sat_frac: Optional[torch.Tensor] = None
         self.last_gate_k_abs_mean: Optional[torch.Tensor] = None
@@ -248,6 +280,8 @@ class CausalSelfAttention(nn.Module):
         self.last_salience_sat_frac: Optional[torch.Tensor] = None
         self.last_forget_bias_abs_mean: Optional[torch.Tensor] = None
         self.last_forget_sat_frac: Optional[torch.Tensor] = None
+        self.last_qtemp_mean: Optional[torch.Tensor] = None
+        self.last_qtemp_sat_frac: Optional[torch.Tensor] = None
         # Post-backward snapshot of mechanism gradient norms (Theorem 5
         # verification during training). Filled by capture_mechanism_grad_norms.
         self.last_mechanism_grad_norms: Optional[Dict[str, torch.Tensor]] = None
@@ -263,6 +297,8 @@ class CausalSelfAttention(nn.Module):
             self.W_gate_v.weight.zero_()
             self.W_gate_sal.weight.zero_()
             self.W_gate_f.weight.zero_()
+            self.W_gate_d.weight.zero_()
+            self.W_qtemp.weight.zero_()
             self.W_range_f.zero_()
             self.W_layer_temp.zero_()
             self.W_phase_scale.zero_()
@@ -289,6 +325,8 @@ class CausalSelfAttention(nn.Module):
                 ("gate_v", self.W_gate_v.weight),
                 ("gate_sal", self.W_gate_sal.weight),
                 ("gate_f", self.W_gate_f.weight),
+                ("gate_d", self.W_gate_d.weight),
+                ("qtemp", self.W_qtemp.weight),
                 ("layer_temp", self.W_layer_temp),
             ]:
                 g = p.grad
@@ -382,6 +420,11 @@ class CausalSelfAttention(nn.Module):
                 tk = torch.tanh(raw_angles_k.detach()).abs()
                 self.last_angle_q_sat_frac = (tq > 0.99).float().mean()
                 self.last_angle_k_sat_frac = (tk > 0.99).float().mean()
+                # Nanda attack: a mean |angle| of 0.1 can be "all angles 0.1"
+                # or "half 0, half 0.2" - std distinguishes uniform use of the
+                # budget from a bimodal on/off pattern.
+                self.last_angle_q_std = angles_q.detach().float().std()
+                self.last_angle_k_std = angles_k.detach().float().std()
         else:
             k_rot = k
             with torch.no_grad():
@@ -390,17 +433,39 @@ class CausalSelfAttention(nn.Module):
                 self.last_angle_k_abs_mean = zero
                 self.last_angle_q_sat_frac = zero
                 self.last_angle_k_sat_frac = zero
+                self.last_angle_q_std = zero
+                self.last_angle_k_std = zero
 
         k = k_rot
-        gate_k_for_distance: Optional[torch.Tensor] = None
+
+        if self.use_qtemp and self.qtemp_alpha != 0.0:
+            # Per-query learned temperature (SSA-family, NeurIPS'24): scale the
+            # query vector => scales its whole score row => per-row softmax
+            # temperature. Bounded like every HLA mechanism; exact identity at
+            # init. Query-side counterpart of the K-gate: K-gate sets how loud
+            # a key IS, q-temp sets how selectively a query LISTENS. Applied to
+            # q itself, so the SDPA fast path remains numerically exact.
+            gate_q = torch.tanh(self.W_qtemp(x)).float()               # (B, T, H)
+            log_temp = torch.clamp(self.qtemp_alpha * self.qtemp_range * gate_q,
+                                   min=-self.qtemp_clip, max=self.qtemp_clip)
+            temp_q = torch.exp(log_temp).to(q.dtype).transpose(1, 2).unsqueeze(-1)
+            q = q * temp_q                                              # (B,H,T,1)
+            with torch.no_grad():
+                self.last_qtemp_mean = temp_q.detach().float().mean()
+                self.last_qtemp_sat_frac = (gate_q.detach().abs() > 0.99).float().mean()
+        else:
+            with torch.no_grad():
+                one = torch.ones((), device=x.device)
+                zero = torch.zeros((), device=x.device)
+                self.last_qtemp_mean = one
+                self.last_qtemp_sat_frac = zero
 
 
         if self.use_laplace and self.laplace_alpha != 0.0:
             
             gate_k = torch.tanh(self.W_gate_k(x)).float()  # (B, T, H)
-            gate_k_for_distance = gate_k
             range_k = (self.laplace_range_k * layer_mult) * (
-                1.0 + 0.25 * torch.tanh(self.W_range_k.float())
+                1.0 + self.range_flex * torch.tanh(self.W_range_k.float())
             )  # (H,)
             range_k = range_k.view(1, 1, self.n_head)
 
@@ -417,7 +482,7 @@ class CausalSelfAttention(nn.Module):
 
             gate_v = torch.tanh(self.W_gate_v(x)).float()  # (B, T, H)
             range_v = (self.laplace_range_v * layer_mult) * (
-                1.0 + 0.25 * torch.tanh(self.W_range_v.float())
+                1.0 + self.range_flex * torch.tanh(self.W_range_v.float())
             )  # (H,)
             range_v = range_v.view(1, 1, self.n_head)
 
@@ -491,11 +556,16 @@ class CausalSelfAttention(nn.Module):
 
 
         if self.use_distance_laplace and self.distance_laplace_alpha != 0.0:
-            if gate_k_for_distance is None:
-                gate_k_for_distance = torch.tanh(self.W_gate_k(x)).float()
+            # Deconfound fix: distance now has its OWN gate (W_gate_d). The old
+            # code reused gate_k, so "suppress this key" and "shorten this
+            # key's reach" shared one weight matrix - cheap, but it meant a
+            # 'distance'-only ablation arm still trained W_gate_k, and the two
+            # mechanisms could not disagree (e.g. keep a key LOUD nearby but
+            # SHORT-range). Identity-init preserved: W_gate_d = 0.
+            gate_d = torch.tanh(self.W_gate_d(x)).float()  # (B, T, H)
             pos = torch.arange(T, device=x.device)
             dist = (pos[:, None] - pos[None, :]).clamp_min(0).float() / float(max(1, T - 1))
-            key_gate = gate_k_for_distance.transpose(1, 2).unsqueeze(2)  # (B,H,1,T_key)
+            key_gate = gate_d.transpose(1, 2).unsqueeze(2)  # (B,H,1,T_key)
             dist_bias = (
                 self.distance_laplace_alpha
                 * self.distance_laplace_range
@@ -550,7 +620,7 @@ class CausalSelfAttention(nn.Module):
             # downcasts float32 to bf16 globally and silently breaks this;
             # use XLA_DOWNCAST_BF16 or keep fp32 enabled for forget-gate runs.
             gate_f = torch.tanh(self.W_gate_f(x)).float()          # (B, T, H)
-            range_f = (self.forget_range * (1.0 + 0.25 * torch.tanh(self.W_range_f.float()))).view(1, 1, self.n_head)
+            range_f = (self.forget_range * (1.0 + self.range_flex * torch.tanh(self.W_range_f.float()))).view(1, 1, self.n_head)
             log_f = self.forget_alpha * gate_f * range_f            # (B, T, H)
             S = torch.cumsum(log_f, dim=1).transpose(1, 2)          # (B, H, T)
             forget_bias = S.unsqueeze(-1) - S.unsqueeze(-2)         # (B,H,T_q,T_k) = S_i - S_j
@@ -665,6 +735,18 @@ class GPTConfig:
     forget_range: float = 0.1
     forget_clip: float = 4.0
 
+    # Q-side temperature (SSA-family). Identity at init (W_qtemp = 0).
+    use_qtemp: bool = False
+    qtemp_alpha: float = 0.0
+    qtemp_range: float = 0.5
+    qtemp_clip: float = 1.5
+
+    # Range flexibility: learned per-head range modifier spans
+    # base_range * (1 +- range_flex). 0.25 was the historical constant; now a
+    # config knob. Guidance: watch range_k_flex_use in depth profiles - if it
+    # pins near 1.0 the model wants more flexibility, raise to 0.5.
+    range_flex: float = 0.25
+
     # Learnable per-layer gate temperature (requires layer_dependent_gate).
     # Identity-compatible: at theta=0 the multiplier equals the static heuristic.
     learnable_layer_temp: bool = False
@@ -719,6 +801,12 @@ class GPTConfig:
             raise ValueError("salience_clip must be positive")
         if self.forget_range < 0:
             raise ValueError("forget_range must be non-negative")
+        if self.qtemp_range < 0:
+            raise ValueError("qtemp_range must be non-negative")
+        if self.qtemp_clip <= 0:
+            raise ValueError("qtemp_clip must be positive")
+        if not (0.0 < self.range_flex <= 1.0):
+            raise ValueError("range_flex must be in (0, 1]")
         if self.forget_clip <= 0:
             raise ValueError("forget_clip must be positive")
         if self.learnable_layer_temp and not self.layer_dependent_gate:
@@ -892,6 +980,8 @@ class GPT(nn.Module):
                 attn.W_gate_v.weight,
                 attn.W_gate_sal.weight,
                 attn.W_gate_f.weight,
+                attn.W_gate_d.weight,
+                attn.W_qtemp.weight,
                 attn.W_range_f,
                 attn.W_layer_temp,
                 attn.W_phase_scale,

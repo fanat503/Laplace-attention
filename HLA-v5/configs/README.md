@@ -1,61 +1,37 @@
 # Configs
 
-## Main pair
+Paired base/HLA configs at 200m, 300m (FLOPs-matched), 600m, 700m
+(+ batch-shape ablations), 800m; `pilot`/`smoke` for infrastructure checks;
+`*_v2` = aggressive gate envelope + salience recipe.
 
-- `800m_base_s42.json`
-- `800m_hla_s42.json`
+## Allowed base<->HLA differences
 
-These are intentionally matched. The only allowed differences are:
+The single source of truth is `ALLOWED_MAIN_DIFFS` in
+`scripts/validate_configs.py`. Currently:
 
-- `variant`
-- `run_name`
-- `save_dir`
-- `init_ckpt`
-- `model.phase_mult`
-- `model.laplace_alpha`
-- `model.baseline_type`
+- bookkeeping: `variant`, `run_name`, `save_dir`, `init_ckpt`, `_doc`,
+  `model.baseline_type`
+- mechanism alphas: `model.phase_mult`, `model.laplace_alpha`,
+  `model.distance_laplace_alpha`, `model.salience_alpha`, `model.forget_alpha`, `model.qtemp_alpha`
+- identity-at-init structural toggles (bit-identical to base when their
+  learned params are zero - verified by tests): `model.layer_dependent_gate`,
+  `model.learnable_layer_temp`, `model.per_head_phase`,
+  `model.layer_dependent_phase`
+- `max_steps` ONLY with `--flops-matched` (HLA <= base; e.g. the 300m pair)
 
-Validate with:
+## Validate
 
 ```bash
 python scripts/validate_configs.py \
-  --base configs/800m_base_s42.json \
-  --hla configs/800m_hla_s42.json
+  --base configs/200m_base_s42.json --hla configs/200m_hla_s42.json
+
+# FLOPs-matched pair:
+python scripts/validate_configs.py \
+  --base configs/300m_base_s42.json --hla configs/300m_hla_s42.json --flops-matched
+
+# numeric sanity for every config:
+python scripts/audit_config_values.py --all
 ```
 
-Current token budget:
-
-```text
-batch_size_per_device = 1
-num_cores             = 8
-block_size            = 1024
-grad_accum            = 32
-tokens/update         = 262,144
-max_steps             = 80,109
-total tokens          = 21,000,093,696
-```
-
-## Smoke/pilot
-
-- `smoke_hla_s42.json`: small model for TPU/XLA plumbing.
-- `pilot_hla_s42.json`: full-size HLA short run.
-
-
-## Recommended confirmation run
-
-- `700m_base_14b_s42.json`
-- `700m_hla_14b_s42.json`
-
-Token budget:
-
-```text
-batch_size_per_device = 1
-num_cores             = 8
-block_size            = 1024
-grad_accum            = 32
-tokens/update         = 262,144
-max_steps             = 53,406
-total effective tokens= 14,000,062,464
-required stored ids   = 14,013,734,400
-params                = 694,046,208
-```
+If this file ever disagrees with `validate_configs.py`, the script wins -
+and please fix this file in the same commit.

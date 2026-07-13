@@ -1,7 +1,7 @@
 # Core (tests, init generation, analysis - CPU is enough)
 # Pin ranges chosen for reproducibility; exact versions recorded per-run in
 # environment.json by the trainer.
-torch>=2.4,<2.13
+torch>=2.4,<2.15
 numpy>=1.26,<3.0
 
 # Dev / CI

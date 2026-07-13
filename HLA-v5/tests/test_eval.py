@@ -36,6 +36,9 @@ from src.eval import (  # noqa: E402
     perturbation_bounds,
     per_layer_gate_analysis,
     mechanism_gradient_statistics,
+    attention_head_similarity,
+    mechanism_knockout,
+    prefix_matching_score,
 )
 from src.model import GPT, GPTConfig  # noqa: E402
 
@@ -58,14 +61,16 @@ class TestInduction:
         assert r != r  # NaN
 
     def test_deterministic(self):
+        # batch_size=8: default 32 materializes (32,256,50257) fp32 ~ 1.6 GB
+        # logits - fine on TPU, OOM on small CI hosts (found in panel sweep).
         model = make_model()
-        r1 = evaluate_induction(model, device="cpu", seed=42)
-        r2 = evaluate_induction(model, device="cpu", seed=42)
+        r1 = evaluate_induction(model, device="cpu", seed=42, batch_size=8)
+        r2 = evaluate_induction(model, device="cpu", seed=42, batch_size=8)
         assert r1 == r2
 
     def test_restores_training_mode(self):
         model = make_model().train()
-        evaluate_induction(model, device="cpu")
+        evaluate_induction(model, device="cpu", batch_size=8)
         assert model.training
 
 
@@ -437,3 +442,146 @@ class TestProbeStateRestoration:
         m.set_diagnostics(enabled=True)
         per_layer_gate_analysis(m)
         assert m.transformer.h[0].attn.capture_diagnostics is True
+
+
+class TestAttentionHeadSimilarity:
+    """Nanda attack: activation-space head redundancy (JS between heads)."""
+
+    def _model(self, **kw):
+        cfg = GPTConfig(block_size=64, vocab_size=256, n_layer=1, n_head=2,
+                        n_embd=32, gradient_checkpointing=False, **kw)
+        return GPT(cfg)
+
+    def test_identical_heads_zero_js(self):
+        m = self._model()
+        attn = m.transformer.h[0].attn
+        with torch.no_grad():
+            C, hd = attn.n_embd, attn.head_dim
+            w = attn.c_attn.weight
+            # head 1 copies head 0 for Q and K -> identical attention maps
+            w[hd:2*hd, :] = w[0:hd, :]
+            w[C+hd:C+2*hd, :] = w[C:C+hd, :]
+        out = attention_head_similarity(m)
+        assert out["head_js_mean"] < 1e-6, "identical heads must give JS ~ 0"
+
+    def test_js_bounded_and_state_restored(self):
+        import math
+        m = self._model(phase_mult=0.15)
+        m.set_diagnostics(enabled=True, capture_attention=True)
+        out = attention_head_similarity(m)
+        assert 0.0 <= out["head_js_mean"] <= math.log(2.0) + 1e-6
+        assert m.transformer.h[0].attn.capture_attention is True  # restored
+
+    def test_deterministic(self):
+        m = self._model(phase_mult=0.15)
+        assert attention_head_similarity(m, seed=1) == attention_head_similarity(m, seed=1)
+
+
+class TestAngleStd:
+    """Nanda attack: mean |angle| hides bimodality - std must be captured."""
+
+    def test_std_zero_at_identity_nonzero_when_active(self):
+        cfg = GPTConfig(block_size=64, vocab_size=256, n_layer=1, n_head=2,
+                        n_embd=32, gradient_checkpointing=False, phase_mult=0.15)
+        m = GPT(cfg).eval()
+        x = torch.randint(0, 256, (1, 32))
+        m(x)
+        assert float(m.transformer.h[0].attn.last_angle_q_std) == 0.0
+        with torch.no_grad():
+            m.transformer.h[0].attn.W_phase_q.normal_(0, 0.5)
+        m(x)
+        assert float(m.transformer.h[0].attn.last_angle_q_std) > 0.0
+
+
+class TestMechanismKnockout:
+    def _model(self):
+        c = GPTConfig(block_size=64, vocab_size=256, n_layer=2, n_head=2,
+                      n_embd=32, gradient_checkpointing=False,
+                      phase_mult=0.15, use_laplace=True, laplace_alpha=1.0)
+        m = GPT(c)
+        with torch.no_grad():
+            for blk in m.transformer.h:
+                blk.attn.W_phase_q.normal_(0, 0.3)
+                blk.attn.W_gate_k.weight.normal_(0, 0.3)
+        return m
+
+    def test_restoration_exact(self):
+        m = self._model().eval()
+        x = torch.randint(0, 256, (2, 32))
+        l_before, _ = m(x)
+        mechanism_knockout(m, x, x)
+        l_after, _ = m(x)
+        assert torch.equal(l_before, l_after), "knockout must restore exactly"
+
+    def test_active_mechanism_has_effect(self):
+        m = self._model()
+        x = torch.randint(0, 256, (2, 32))
+        out = mechanism_knockout(m, x, x)
+        assert out["ko_phase_delta"] != 0.0, "randomized phase must carry load"
+
+    def test_absent_mechanism_zero_delta(self):
+        m = self._model()
+        x = torch.randint(0, 256, (2, 32))
+        out = mechanism_knockout(m, x, x)
+        assert out["ko_salience_delta"] == 0.0  # salience_alpha=0 in config
+
+
+class TestPrefixMatching:
+    # Memory note: logits are (B,T,50257); keep B=1, block=128 so tiny CI
+    # hosts survive ((1,128,50257) fp32 ~ 25 MB).
+    def test_keys_and_range(self):
+        c = GPTConfig(block_size=128, vocab_size=50257, n_layer=2, n_head=2,
+                      n_embd=32, gradient_checkpointing=False)
+        out = prefix_matching_score(GPT(c), batch_size=1)
+        assert "prefix_match_global_max" in out
+        assert 0.0 <= out["prefix_match_global_max"] <= 1.0
+        assert "L00_prefix_match_max" in out and "L01_prefix_match_mean" in out
+
+    def test_state_restored_and_deterministic(self):
+        c = GPTConfig(block_size=128, vocab_size=50257, n_layer=1, n_head=2,
+                      n_embd=32, gradient_checkpointing=False)
+        m = GPT(c)
+        r1 = prefix_matching_score(m, seed=7, batch_size=1)
+        r2 = prefix_matching_score(m, seed=7, batch_size=1)
+        assert r1 == r2
+        assert m.transformer.h[0].attn.capture_attention is False
+
+
+class TestRangeFlexConsistency:
+    """Final polish sweep: range_flex became a config knob, but
+    perturbation_bounds still hardcoded the historical 1.25 factor -
+    with range_flex != 0.25 the probe reported a silently WRONG envelope."""
+
+    def _hla_flex(self, flex):
+        cfg = GPTConfig(block_size=64, vocab_size=256, n_layer=1, n_head=2,
+                        n_embd=32, gradient_checkpointing=False,
+                        phase_mult=0.15, use_laplace=True, laplace_alpha=1.0,
+                        range_flex=flex)
+        return GPT(cfg)
+
+    def test_envelope_tracks_range_flex(self):
+        import math as _m
+        for flex in (0.25, 0.5, 1.0):
+            m = self._hla_flex(flex)
+            out = perturbation_bounds(m)
+            attn = m.transformer.h[0].attn
+            lam = float(attn.layer_gate_multiplier)
+            eff = lam * min(attn.laplace_alpha * attn.laplace_range_k * (1.0 + flex),
+                            attn.k_log_clip)
+            expected_hi = (1 - attn.beta_k) + attn.beta_k * _m.exp(eff)
+            got = out["L00_theo_mix_k_max"]
+            assert abs(got - expected_hi) < 1e-9, (
+                f"range_flex={flex}: probe envelope {got} != model envelope "
+                f"{expected_hi} (hardcoded 1.25 regression)")
+
+    def test_saturated_mix_stays_inside_flex_envelope(self):
+        """With range_flex=1.0 the true envelope is WIDER than the 1.25 one:
+        a saturated gate must still be inside the probe's reported bound."""
+        m = self._hla_flex(1.0)
+        with torch.no_grad():
+            for blk in m.transformer.h:
+                blk.attn.W_gate_k.weight.fill_(1000.0)
+                blk.attn.W_range_k.fill_(1000.0)
+        out = perturbation_bounds(m)
+        assert out["L00_mix_k_max"] <= out["L00_theo_mix_k_max"] + 1e-4
+        assert out["L00_util_k_up"] > 0.99

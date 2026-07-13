@@ -471,7 +471,7 @@ def count_parameters(model: torch.nn.Module) -> Dict[str, int]:
 HLA_NODECAY_MARKERS = (
     "W_phase_q", "W_phase_k", "W_phase_scale",
     "W_range_k", "W_range_v", "W_range_f",
-    "W_gate_k", "W_gate_v", "W_gate_sal", "W_gate_f",
+    "W_gate_k", "W_gate_v", "W_gate_sal", "W_gate_f", "W_gate_d", "W_qtemp",
     "W_layer_temp",
 )
 
@@ -1053,6 +1053,8 @@ def open_csv(save_dir: str, run_name: str, config: Dict[str, Any], param_report:
             "phase_budget_mean",
             "mech_grad_mean",
             "mech_grad_min",
+            "qtemp_mean",
+            "qtemp_sat_frac",
         ])
     else:
         writer.writerow([])
@@ -1511,6 +1513,8 @@ def _train_worker_fn(index: int, config: Dict[str, Any]) -> None:
                         fmt(metrics.get("phase_budget_mean", float("nan"))),
                         fmt(metrics.get("mech_grad_mean", float("nan"))),
                         fmt(metrics.get("mech_grad_min", float("nan"))),
+                        fmt(metrics.get("qtemp_mean", float("nan"))),
+                        fmt(metrics.get("qtemp_sat_frac", float("nan"))),
                     ])
                     csv_file.flush()
                     master_print(

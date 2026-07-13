@@ -20,6 +20,7 @@ Checks (each prints PASS / WARN / FAIL with the number that triggered it):
   E8  Worst-layer combined K amplification <= 3x score scale
   E9  LR vs width: lr * n_embd within [0.25, 0.75] (muP-style heuristic band)
   E10 Warmup fraction within [1%, 10%] of max_steps
+  E11 Q-temp reach: per-query temperature within [x0.2, x5] (<= ~1.6 nats)
 """
 
 from __future__ import annotations
@@ -55,6 +56,12 @@ def audit(path: str) -> dict:
     if not is_hla:
         print("  (base/ablated config: HLA knobs inactive, checking trainer knobs only)")
 
+    # range_flex is a config knob since the final sweep (default 0.25 = the
+    # historical +25% W_range headroom). Hardcoding 1.25 here was a silent-drift
+    # bug: a config with range_flex != 0.25 would be audited against the WRONG
+    # envelope while the model uses the right one.
+    flex = 1.0 + float(m.get("range_flex", 0.25))
+
     # --- E1/E2/E3/E4: gate envelopes ---
     if is_hla and bool(m.get("use_laplace", False)):
         env = {}
@@ -62,7 +69,7 @@ def audit(path: str) -> dict:
             rng = float(m[f"laplace_range_{side}"])
             beta = float(m[f"beta_{side}"])
             clip = float(m[f"{side}_log_clip"])
-            pre_clip = alpha * rng * 1.25 * lm          # |tanh|<=1, W_range at +25%
+            pre_clip = alpha * rng * flex * lm          # |tanh|<=1, W_range at +range_flex
             eff = min(pre_clip, clip * lm)
             hi = (1 - beta) + beta * math.exp(eff)
             lo = (1 - beta) + beta * math.exp(-eff)
@@ -90,7 +97,7 @@ def audit(path: str) -> dict:
             elif slack >= 1.0:
                 report("WARN", "E3", f"{side.upper()}-clip slack only {slack:.2f}x: clip may bind at saturation -> masks true envelope, widen clip", counters)
             else:
-                report("FAIL", "E3", f"{side.upper()}-clip BINDS (slack {slack:.2f}x < 1): envelope silently truncated; clip must exceed alpha*range*1.25*lm", counters)
+                report("FAIL", "E3", f"{side.upper()}-clip BINDS (slack {slack:.2f}x < 1): envelope silently truncated; clip must exceed alpha*range*(1+range_flex)*lm", counters)
 
             g0 = beta * alpha * rng   # d(mix)/d(raw_gate) at init
             if 0.02 <= g0 <= 0.7:
@@ -135,10 +142,19 @@ def audit(path: str) -> dict:
         else:
             report("WARN", "E7", f"distance bias reach {d_reach:.2f} > 1.0 nats: strong positional prior, may fight RoPE", counters)
 
+    # --- E11: Q-side temperature reach ---
+    if bool(m.get("use_qtemp", False)) and float(m.get("qtemp_alpha", 0.0)) != 0.0:
+        q_reach = min(float(m.get("qtemp_alpha", 0.0)) * float(m.get("qtemp_range", 0.5)),
+                      float(m.get("qtemp_clip", 1.5)))
+        if q_reach <= 1.61:  # ln(5): temperature within [x0.2, x5]
+            report("PASS", "E11", f"q-temp reach +-{q_reach:.2f} nats (x{math.exp(-q_reach):.2f} .. x{math.exp(q_reach):.1f})", counters)
+        else:
+            report("WARN", "E11", f"q-temp reach +-{q_reach:.2f} > 1.61 nats: scores scaled >5x, softmax may saturate; lower qtemp_range/clip", counters)
+
     # --- E8: worst-layer combined K amplification ---
     if is_hla and bool(m.get("use_laplace", False)):
         beta_k, rng_k = float(m["beta_k"]), float(m["laplace_range_k"])
-        k_max = (1 - beta_k) + beta_k * math.exp(min(alpha * rng_k * 1.25 * lm, float(m["k_log_clip"]) * lm))
+        k_max = (1 - beta_k) + beta_k * math.exp(min(alpha * rng_k * flex * lm, float(m["k_log_clip"]) * lm))
         if k_max <= 3.0:
             report("PASS", "E8", f"worst-layer K amplification x{k_max:.2f}", counters)
         else:

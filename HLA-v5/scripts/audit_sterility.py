@@ -174,6 +174,7 @@ def check_main_configs() -> None:
         "model.distance_laplace_alpha",
         "model.salience_alpha",
         "model.forget_alpha",
+        "model.qtemp_alpha",
         "model.layer_dependent_gate",
         "model.learnable_layer_temp",
         "model.per_head_phase",
