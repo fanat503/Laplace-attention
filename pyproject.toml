@@ -1,0 +1,26 @@
+[project]
+name = "hla"
+version = "5.4.0"
+description = "Holographic Laplace Attention: decoupling retrieval from content transmission in softmax attention, with a sterile comparison harness"
+# NOTE: no `readme` key on purpose - the README lives at the repository root,
+# one level above this package dir, and setuptools cannot reference ../ paths.
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Slyatski Ilya" }]
+urls = { Repository = "https://github.com/fanat503/Laplace-attention" }
+dependencies = [
+    "torch>=2.4,<2.15",
+    "numpy>=1.26,<3.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pyflakes>=3.2"]
+data = ["datasets>=2.19", "tiktoken>=0.6", "tqdm>=4.66"]
+# TPU: install torch_xla matching your torch version (see requirements.txt)
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q -W error::UserWarning"
+
+[tool.setuptools]
+packages = ["src"]
