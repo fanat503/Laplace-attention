@@ -1,0 +1,16 @@
+{
+  "id": "lehoangnam/hla-v5-kaggle-smoke",
+  "title": "HLA v5 Kaggle Smoke",
+  "code_file": "main.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": "true",
+  "enable_gpu": "false",
+  "enable_tpu": "true",
+  "enable_internet": "true",
+  "machine_shape": "",
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": [],
+  "model_sources": []
+}
