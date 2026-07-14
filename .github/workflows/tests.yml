@@ -51,3 +51,22 @@ jobs:
 
       - name: Repository sterility audit
         run: python scripts/audit_sterility.py
+
+      - name: CLI smoke (every script --help must work on a CPU host)
+        run: |
+          # B1/H3-class regressions: a hard import of torch_xla/tiktoken in any
+          # entrypoint breaks CPU hosts. --help exercises module import + parser.
+          for f in scripts/*.py; do
+            python "$f" --help > /dev/null || { echo "FAILED: $f --help"; exit 1; }
+          done
+          python src/train_xla.py --help > /dev/null
+          python src/make_init.py --help > /dev/null
+
+      - name: E2E pipeline smoke (dummy data -> init -> validate -> analyze)
+        run: |
+          python scripts/make_dummy_data.py
+          python src/make_init.py --config configs/smoke_hla_s42.json --out /tmp/init_smoke.pt
+          python scripts/validate_data_pair.py --config configs/smoke_hla_s42.json
+          python scripts/check_dataloader.py --config configs/smoke_hla_s42.json --batches 2
+          python scripts/analyze_checkpoint.py --checkpoint /tmp/init_smoke.pt --out /tmp/ana.json --device cpu
+          python scripts/ci_check_analysis.py /tmp/ana.json
