@@ -63,18 +63,33 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Sampler
 
-import torch_xla.core.xla_model as xm
-import torch_xla.distributed.parallel_loader as pl
-import torch_xla.distributed.xla_multiprocessing as xmp
+# B1 fix (external review): torch_xla is imported lazily so that
+# `python src/train_xla.py --help`, imports and doc tooling work on CPU-only
+# hosts. Actual training still requires torch_xla and fails fast with a clear
+# message in main() instead of an ImportError at line 1 of the traceback.
+try:
+    import torch_xla.core.xla_model as xm
+    import torch_xla.distributed.parallel_loader as pl
+    import torch_xla.distributed.xla_multiprocessing as xmp
+except ImportError:  # pragma: no cover - CPU-only host
+    xm = None
+    pl = None
+    xmp = None
 try:
     import torch_xla.debug.metrics as xla_metrics
 except Exception:  # pragma: no cover - version dependent
     xla_metrics = None
 
-# Allow `python train_xla.py` from the project root or from this directory.
+# Allow `python src/train_xla.py` from the project root or from src/.
+# B2-adjacent fix (external review): imports below are `from src.model ...`,
+# so the REPO ROOT (parent of src/) must be importable - not src/ itself.
+# The old code inserted src/ only; the mistake was masked by the (now lazy)
+# torch_xla import failing first on CPU hosts.
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-if _THIS_DIR not in sys.path:
-    sys.path.insert(0, _THIS_DIR)
+_REPO_ROOT = os.path.dirname(_THIS_DIR)
+for _p in (_REPO_ROOT, _THIS_DIR):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from src.model import GPT, GPTConfig, RMSNorm  # noqa: E402
 from src.data import FixedDataset, fixed_token_collate, worker_init_fn  # noqa: E402
@@ -283,7 +298,57 @@ def environment_snapshot() -> Dict[str, Any]:
     return snap
 
 
+KNOWN_TOP_LEVEL_KEYS = frozenset({
+    # identity / paths
+    "seed", "run_name", "save_dir", "variant", "_doc",
+    "train_path", "val_path", "init_ckpt", "resume_ckpt",
+    # batching / schedule
+    "batch_size_per_device", "eval_batch_size_per_device", "grad_accum",
+    "max_steps", "lr", "min_lr", "warmup", "weight_decay", "betas",
+    "adam_eps", "grad_clip",
+    # cadence
+    "log_every", "val_every", "val_batches", "save_every", "resume_every",
+    "svd_every", "xla_metrics_every", "keep_last_checkpoints",
+    # data / loader
+    "expected_vocab_size", "num_workers", "dataloader_prefetch_factor",
+    "allow_multiple_epochs", "validate_dataset_full",
+    "xla_loader_prefetch_size", "xla_device_prefetch_size",
+    # runtime
+    "num_cores", "xmp_start_method", "xla_autocast", "min_free_gb",
+    # guards / escape hatches
+    "check_init_hla_identity", "init_strict", "fail_on_nonfinite_val",
+    "allow_resume_config_mismatch", "allow_init_config_mismatch",
+    "allow_unknown_config_keys",
+    # model subtree (validated by GPTConfig itself, which rejects typos)
+    "model",
+})
+
+
 def validate_config(config: Dict[str, Any]) -> None:
+    # B7 fix (external review): the forget-gate cumulative sum is only correct
+    # in fp32 (bf16 ulp ~0.78 near |S|~200 swallows per-token steps ~0.1; the
+    # .float() cast in model.py is load-bearing). XLA_USE_BF16=1 /
+    # XLA_DOWNCAST_BF16=1 physically downcast fp32 tensors on TPU, silently
+    # breaking the mechanism - fail fast instead of training garbage.
+    # Final hardening: a TYPO in a top-level key (warmup_steps vs warmup)
+    # silently fell back to defaults - the run trained with wrong hparams and
+    # nobody was told. GPTConfig already rejects unknown model.* keys (frozen
+    # dataclass); this closes the same hole one level up.
+    unknown = set(config) - KNOWN_TOP_LEVEL_KEYS
+    if unknown and not bool(config.get("allow_unknown_config_keys", False)):
+        raise KeyError(
+            f"Unknown top-level config keys (typo?): {sorted(unknown)}. "
+            "Set allow_unknown_config_keys=true only if intentional."
+        )
+    model_cfg = config.get("model", {}) or {}
+    if float(model_cfg.get("forget_alpha", 0.0) or 0.0) != 0.0:
+        for env_key in ("XLA_USE_BF16", "XLA_DOWNCAST_BF16"):
+            if os.environ.get(env_key, "") not in ("", "0"):
+                raise ValueError(
+                    f"forget_alpha != 0 requires fp32 cumsum, but {env_key}="
+                    f"{os.environ[env_key]!r} downcasts fp32 on TPU. Unset it "
+                    "(use bf16 via model dtype, not global env downcast)."
+                )
     required = [
         "seed",
         "save_dir",
@@ -1681,6 +1746,15 @@ def main() -> None:
     parser.add_argument("--config", required=True, type=str, help="Path to JSON config")
     parser.add_argument("--override", action="append", default=[], help="Override as dotted.key=json_value")
     args = parser.parse_args()
+
+    if xm is None:
+        raise SystemExit(
+            "torch_xla is not installed - training requires a TPU host.\n"
+            "Install per requirements.txt, e.g.:\n"
+            "  pip install torch~=2.5.0 torch_xla[tpu]~=2.5.0 "
+            "-f https://storage.googleapis.com/libtpu-releases/index.html\n"
+            "(CPU-only hosts can still run tests, audits and all scripts/.)"
+        )
 
     config = load_config(args.config)
     for item in args.override:
