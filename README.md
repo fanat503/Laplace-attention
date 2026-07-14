@@ -5,7 +5,7 @@
 **Separating finding tokens from transmitting them in softmax attention**
 
 [![tests](https://github.com/fanat503/Laplace-attention/actions/workflows/tests.yml/badge.svg)](https://github.com/fanat503/Laplace-attention/actions/workflows/tests.yml)
-[![Theory](https://img.shields.io/badge/theory-9%20verified%20theorems-blue)](HLA-v5/docs/THEORY.md)
+[![Theory](https://img.shields.io/badge/theory-9%20verified%20theorems-blue)](docs/THEORY.md)
 [![License](https://img.shields.io/badge/license-Apache--2.0-lightgrey)](LICENSE)
 
 </div>
@@ -14,9 +14,9 @@ Every attention head does two interconnected jobs with one set of vectors: **ret
 
 This repository contains:
 
-1. **The mechanism** — one modified attention equation, seven identity-initialized components ([`src/model.py`](HLA-v5/src/model.py), single file);
+1. **The mechanism** — one modified attention equation, seven identity-initialized components ([`src/model.py`](src/model.py), single file);
 2. **A sterile comparison harness** — base and HLA train from the *same initial weights* on the *same data in the same order*, with parameter matching and config validation enforced by tests;
-3. **Theory and diagnostics** — 9 numerically verified theorems ([`docs/THEORY.md`](HLA-v5/docs/THEORY.md)), causal knockout probes, interference and spectral metrics logged during training ([`docs/METRICS.md`](HLA-v5/docs/METRICS.md)).
+3. **Theory and diagnostics** — 9 numerically verified theorems ([`docs/THEORY.md`](docs/THEORY.md)), causal knockout probes, interference and spectral metrics logged during training ([`docs/METRICS.md`](docs/METRICS.md)).
 
 **Status**: infrastructure complete and tested; sterile training runs are the current roadmap item. Earlier iterations showed a 0.09 validation loss gap at 100M — reproducing that inside the harness is the first experiment, not a claim.
 
@@ -36,13 +36,13 @@ Phase carries *where to look*; magnitude carries *what is said* — like a holog
 | `B_ij` | additive biases: salience  + content-conditioned distance decay + FoX-style forget gate (baseline arm) | `0` |
 | `τ_i` | per-query softmax temperature — how sharply each query listens | `1` |
 
-Everything is per-head, tanh-bounded, causally safe, and **exactly zero at initialization**: an HLA model *is* a standard Transformer at step 0 (bit-exact in fp32 and bf16, verified). Full derivation, envelopes, and proofs: [`docs/THEORY.md`](HLA-v5/docs/THEORY.md).
+Everything is per-head, tanh-bounded, causally safe, and **exactly zero at initialization**: an HLA model *is* a standard Transformer at step 0 (bit-exact in fp32 and bf16, verified). Full derivation, envelopes, and proofs: [`docs/THEORY.md`](docs/THEORY.md).
 
 ## Getting started
 
 ```bash
 git clone https://github.com/fanat503/Laplace-attention.git
-cd Laplace-attention/HLA-v5
+cd Laplace-attention
 pip install -r requirements.txt        # torch (CPU is enough), numpy, pytest
 
 python -m pytest tests/ -q             # → 229 passed, CPU-only, ~1 min
@@ -71,11 +71,11 @@ python scripts/make_ablation_configs.py \
     --outdir configs/ablations_200m --seeds 42 43 44
 ```
 
-Recommended ladder before any long run: `smoke` (10 steps), then `pilot` (1000) and then full pairs. Config discipline and value sanity are enforced by `validate_configs.py` and `audit_config_values.py`; We pre-registered our experimental design on [`docs/EXPERIMENT_CARD.md`](HLA-v5/docs/EXPERIMENT_CARD.md).
+Recommended ladder before any long run: `smoke` (10 steps), then `pilot` (1000) and then full pairs. Config discipline and value sanity are enforced by `validate_configs.py` and `audit_config_values.py`; We pre-registered our experimental design on [`docs/EXPERIMENT_CARD.md`](docs/EXPERIMENT_CARD.md).
 
 ## Why trust the comparison
 
-The methodology is designed so that cheating is hard, and each guarantee is an executable test rather than a promise — 229 tests ([protocol & threat model](HLA-v5/docs/STERILITY.md)):
+The methodology is designed so that cheating is hard, and each guarantee is an executable test rather than a promise — 229 tests ([protocol & threat model](docs/STERILITY.md)):
 
 - **Same start** — shared backbone weights (tensor-equal), HLA params zeroed, bit-exact logits at init;
 - **Same size** — every mechanism module exists in the base too (α = 0, frozen, counted);
@@ -83,12 +83,11 @@ The methodology is designed so that cheating is hard, and each guarantee is an e
 - **Same knobs** — config validator rejects any undeclared difference; hyperparameters tuned on base only; HLA params excluded from weight decay (zero *is* their identity state);
 - **Measured honestly** — parameter-matched *and* FLOPs-matched pairs; mechanism compute overhead ~7% at 200M, reported.
 
-Training logs record interference metrics (specifically, whether retrieval clarity improves while compositional capabilities are preserved), distractor induction margins, saturation fractions, spectral ranks, and per-mechanism gradient norms. Crucially, the figures presented in this paper are generated directly from these raw CSV logs rather than via post-hoc analysis. Checkpoint level causal probes, including mechanism knockouts and prefix matching scores, are documented in [`src/eval.py`](HLA-v5/src/eval.py).
+Training logs record interference metrics (specifically, whether retrieval clarity improves while compositional capabilities are preserved), distractor induction margins, saturation fractions, spectral ranks, and per-mechanism gradient norms. Crucially, the figures presented in this paper are generated directly from these raw CSV logs rather than via post-hoc analysis. Checkpoint level causal probes, including mechanism knockouts and prefix matching scores, are documented in [`src/eval.py`](src/eval.py).
 
 ## Repository layout
 
 ```
-HLA-v5/
 ├── src/          model.py (GPT + mechanisms) · train_xla.py (TPU trainer) · eval.py (probes)
 │                 make_init.py (sterile inits) · data.py · manifest.py · utils.py
 ├── configs/      20 paired base/HLA JSONs: 200m–800m, FLOPs-matched, v2 recipe, pilot, smoke
@@ -98,7 +97,7 @@ HLA-v5/
 └── tests/        7 files · 229 tests · CPU-only
 ```
 
-`HLA-v4/` is the archived predecessor. CI runs the full suite plus three audits on every push.
+CI runs the full suite plus three audits on every push.
 
 ## FAQ
 

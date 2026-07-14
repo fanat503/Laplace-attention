@@ -206,7 +206,7 @@ class TestDocsConsistency:
 
     def test_readme_test_count_matches_collected(self):
         import re, subprocess
-        readme = open(os.path.join(ROOT, "..", "README.md"), encoding="utf-8").read()
+        readme = open(os.path.join(ROOT, "README.md"), encoding="utf-8").read()
         # Only TOTAL-count claims (badge, layout total, quick-start echo,
         # section header) - NOT per-file mentions like "test_theory.py (9 tests)".
         claimed = set(int(m) for m in re.findall(r"tests-(\d+)%20passing", readme))
@@ -356,7 +356,7 @@ class TestFinalPolishSweep:
         equal len(ARMS). (Caught a real 15-vs-14 drift during review.)"""
         import re as _re
         n = len(ARMS)
-        for rel in ("../README.md", "docs/EXPERIMENT_CARD.md"):
+        for rel in ("README.md", "docs/EXPERIMENT_CARD.md"):
             text = open(os.path.join(ROOT, rel), encoding="utf-8").read()
             claims = [int(m) for m in _re.findall(r"(\d+) arms", text)]
             for c in claims:
