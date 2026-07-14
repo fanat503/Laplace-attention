@@ -86,27 +86,48 @@ def load_model(ckpt_path: str, config_path: str) -> tuple[GPT, int]:
 
 @torch.no_grad()
 def divergence_metrics(base: GPT, hla: GPT, x: torch.Tensor, y: torch.Tensor) -> dict:
-    lb, loss_b = base(x, y)
-    lh, loss_h = hla(x, y)
-    lb32, lh32 = lb.float(), lh.float()
+    # Memory note (final polish): forwards run micro-batched (rows of 1) and
+    # KL/cosine accumulate per row; holding TWO full (B,T,vocab) fp32 logit
+    # tensors at once OOM-killed small analysis hosts (exit 137). Results are
+    # identical - cosine over concatenated rows == cosine over the full flat
+    # tensor only when accumulated as dot/norms, which is what we do.
     if base.config.vocab_size != hla.config.vocab_size:
         raise ValueError(
             f"vocab_size mismatch: base={base.config.vocab_size}, "
             f"hla={hla.config.vocab_size} - KL over different supports is meaningless"
         )
-    if lb32.shape != lh32.shape:
-        raise ValueError(f"logit shape mismatch: {tuple(lb32.shape)} vs {tuple(lh32.shape)}")
-    cos = F.cosine_similarity(lb32.reshape(1, -1), lh32.reshape(1, -1)).item()
-    # mean per-token KL(base || hla) over the true vocab slice
     V = base.config.vocab_size
-    logp_b = F.log_softmax(lb32[..., :V], dim=-1)
-    logp_h = F.log_softmax(lh32[..., :V], dim=-1)
-    kl = (logp_b.exp() * (logp_b - logp_h)).sum(-1).mean().item()
+    dot = 0.0
+    nb2 = 0.0
+    nh2 = 0.0
+    kl_sum = 0.0
+    kl_cnt = 0
+    loss_b_sum = 0.0
+    loss_h_sum = 0.0
+    n_rows = int(x.size(0))
+    for i in range(n_rows):
+        xi, yi = x[i:i + 1], y[i:i + 1]
+        lb, loss_b = base(xi, yi)
+        lh, loss_h = hla(xi, yi)
+        lb32, lh32 = lb.float(), lh.float()
+        if lb32.shape != lh32.shape:
+            raise ValueError(f"logit shape mismatch: {tuple(lb32.shape)} vs {tuple(lh32.shape)}")
+        dot += float((lb32 * lh32).sum())
+        nb2 += float((lb32 * lb32).sum())
+        nh2 += float((lh32 * lh32).sum())
+        logp_b = F.log_softmax(lb32[..., :V], dim=-1)
+        logp_h = F.log_softmax(lh32[..., :V], dim=-1)
+        kl_sum += float((logp_b.exp() * (logp_b - logp_h)).sum(-1).mean())
+        kl_cnt += 1
+        loss_b_sum += float(loss_b)
+        loss_h_sum += float(loss_h)
+        del lb, lh, lb32, lh32, logp_b, logp_h
+    cos = dot / max((nb2 ** 0.5) * (nh2 ** 0.5), 1e-30)
     return {
         "cosine_sim": cos,
-        "kl_base_hla": kl,
-        "val_loss_base": float(loss_b),
-        "val_loss_hla": float(loss_h),
+        "kl_base_hla": kl_sum / max(kl_cnt, 1),
+        "val_loss_base": loss_b_sum / n_rows,
+        "val_loss_hla": loss_h_sum / n_rows,
     }
 
 

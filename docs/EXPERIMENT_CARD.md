@@ -20,6 +20,21 @@ H2: qk_interference decreases vs base while ov_interference is preserved
     (qk_ov_separation increases).
 H3: distractor_margin improves faster than base during training.
 
+## Active mechanism sets per config (B6: capacity vs default)
+
+The codebase implements SEVEN mechanisms; shipped training configs activate a
+deliberate SUBSET. "Seven mechanisms" describes model capacity, not the
+default treatment arm - stated here explicitly so no reader infers that the
+headline number used everything at once.
+
+| Config family | Active in HLA arm | Off (identity, parameter-matched) |
+|---|---|---|
+| 200m v1 (`200m_hla_s42`) | phase, K/V gates, distance | salience, forget, qtemp, adaptivity extras |
+| 200m v2 (`200m_hla_v2_s42`, primary) | phase, K/V gates, distance, salience | forget, qtemp, adaptivity extras |
+| Ablation matrix arms | exactly one mechanism per single-factor arm | everything else |
+| `forget` arm | forget only (FoX baseline) | all HLA mechanisms |
+| `qtemp` arm | qtemp only | all others |
+
 ## Pre-registered decisions (locked before headline runs)
 | Decision | Value | Rationale |
 |---|---|---|

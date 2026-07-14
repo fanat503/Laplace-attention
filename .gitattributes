@@ -1,0 +1,12 @@
+# Enforce LF for all text files: CRLF snuck in via web uploads and breaks
+# bash heredocs, patch application and produces noisy diffs on Linux hosts.
+* text=auto eol=lf
+*.py text eol=lf
+*.sh text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.toml text eol=lf
+*.json text eol=lf
+*.png binary
+*.pt binary
+*.bin binary

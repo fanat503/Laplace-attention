@@ -100,6 +100,58 @@ def plot_analysis(analysis_json: str, out_dir: str, prefix: str) -> None:
         plt.close()
 
 
+MECHANISM_PANELS = [
+    # (title, ylabel, [columns]) - one subplot per entry, columns drawn per log.
+    ("Retrieval probes", "probability / margin",
+     ["induction", "distractor_induction", "distractor_margin"]),
+    ("Head interference (Transformer-Circuits)", "subspace overlap",
+     ["qk_interference", "ov_interference", "qk_ov_separation"]),
+    ("Saturation fractions (|tanh|>0.99)", "fraction",
+     ["angle_q_sat_frac", "angle_k_sat_frac", "gate_k_sat_frac",
+      "gate_v_sat_frac", "qtemp_sat_frac"]),
+    ("Mechanism gradient norms (Theorem 5, live)", "L2 norm",
+     ["mech_grad_mean", "mech_grad_min"]),
+    ("Learned profiles", "multiplier",
+     ["layer_temp_last", "phase_budget_mean", "qtemp_mean"]),
+    ("Spectral shape", "rank / share",
+     ["svd_phase_erank", "svd_qk_stable_rank", "svd_v_stable_rank"]),
+]
+
+
+def plot_mechanism_dashboard(logs: Dict[str, Dict[str, List[float]]], out: str) -> None:
+    """One figure, six panels: every diagnostic CSV column family vs tokens.
+
+    Columns that are all-NaN in a log (mechanism inactive / cadence gated)
+    are skipped silently, so the same dashboard works for base and HLA runs.
+    """
+    plt = require_matplotlib()
+    fig, axes = plt.subplots(3, 2, figsize=(13, 12))
+    for ax, (title, ylabel, cols) in zip(axes.flat, MECHANISM_PANELS):
+        drew = False
+        for name, log in logs.items():
+            x = log.get("tokens_seen", [])
+            for col in cols:
+                ys = log.get(col, [])
+                pairs = [(xi, yi) for xi, yi in zip(x, ys) if not math.isnan(yi)]
+                if not pairs:
+                    continue
+                ax.plot([p[0] for p in pairs], [p[1] for p in pairs],
+                        label=f"{name}:{col}", alpha=0.85)
+                drew = True
+        ax.set_title(title)
+        ax.set_xlabel("tokens seen")
+        ax.set_ylabel(ylabel)
+        if drew:
+            ax.legend(fontsize=7)
+        else:
+            ax.text(0.5, 0.5, "no data", ha="center", va="center",
+                    transform=ax.transAxes, color="gray")
+    fig.tight_layout()
+    Path(out).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, dpi=140)
+    plt.close(fig)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--base-log")
@@ -113,6 +165,12 @@ def main() -> None:
     os.makedirs(args.out_dir, exist_ok=True)
     if args.base_log and args.hla_log:
         plot_loss(args.base_log, args.hla_log, os.path.join(args.out_dir, "loss_curves.png"))
+        plot_mechanism_dashboard(
+            {"base": read_log(args.base_log), "hla": read_log(args.hla_log)},
+            os.path.join(args.out_dir, "mechanism_dashboard.png"))
+    elif args.hla_log:
+        plot_mechanism_dashboard({"hla": read_log(args.hla_log)},
+                                 os.path.join(args.out_dir, "mechanism_dashboard.png"))
     if args.base_analysis:
         plot_analysis(args.base_analysis, args.out_dir, "base")
     if args.hla_analysis:

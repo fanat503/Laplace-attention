@@ -787,6 +787,17 @@ class GPTConfig:
             raise ValueError("rope_theta must be positive")
         if not self.use_wpe and not self.use_rope:
             raise ValueError("model needs positional information: use_wpe and use_rope are both False")
+        if self.use_wpe and self.use_rope:
+            # B4 fix (external review): dual positional encoding silently changes
+            # semantics (learned absolute + rotary applied together shift logits
+            # by ~0.25 and confound every position-related ablation). Exactly one
+            # scheme must be active; this was documented as intent but never
+            # enforced - and the lack of enforcement let even our own test
+            # fixtures run dual-PE unnoticed.
+            raise ValueError(
+                "exactly one positional scheme must be active: "
+                "use_wpe and use_rope are both True (set use_wpe=false for RoPE runs)"
+            )
         if self.beta_k < 0 or self.beta_v < 0:
             raise ValueError("beta_k and beta_v must be non-negative")
         if self.k_log_clip <= 0 or self.v_log_clip <= 0:
