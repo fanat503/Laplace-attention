@@ -188,6 +188,20 @@ gives a second, positional reading of the same mechanism: retrieval geometry
 (holographic reading, Theorem 6) == learned positional displacement field
 (positional reading, this theorem). Both are exact, not analogies.
 
+#### Corollary 7.1 (RoPE and content phase commute). ✓ tested to fp32 eps
+Both RoPE and the content phase act as pairwise rotations in the SAME 2D
+planes (the chunk pairing of Theorem 8). Rotations within one plane form the
+abelian group SO(2), so for every plane c:
+
+    R(w_c * t) . R(theta_c(x)) = R(theta_c(x)) . R(w_c * t) = R(w_c * t + theta_c(x))
+
+Consequence: the "phase before RoPE vs after RoPE" ordering question - a
+natural reviewer ablation request - is settled by algebra, not by experiment:
+both orders produce bit-identical scores (verified numerically to fp32
+rounding, ~1e-6). The only meaningful object is the SUM of angles, which is
+exactly the positional-displacement reading of Theorem 7. No ablation arm is
+needed, and none is run. ∎
+
 ### Theorem 8 (Pairing-scheme equivalence). ✓ tested to 0.0
 The chunk pairing used here (plane i = coordinates (x_i, x_{i+d/2})) and the
 interleaved pairing of the original RoPE paper (plane i = (x_{2i}, x_{2i+1}))

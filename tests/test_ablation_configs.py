@@ -374,3 +374,255 @@ class TestFinalPolishSweep:
         for flag in cfg_flags:
             assert f'"{flag}"' in src, (
                 f"structural-flags test does not check {flag}; add it to the tuple")
+
+
+class TestExternalReviewRound2:
+    """Regression tests for the second external review (B1/B4/B6/B7)."""
+
+    def test_dual_positional_encoding_rejected(self):
+        """B4: use_wpe=True + use_rope=True must raise, not silently dual-encode."""
+        from src.model import GPTConfig
+        with pytest.raises(ValueError, match="exactly one positional scheme"):
+            GPTConfig(block_size=64, vocab_size=256, n_layer=1, n_head=2,
+                      n_embd=32, use_wpe=True, use_rope=True)
+
+    def test_trainer_importable_and_helpful_without_xla(self):
+        """B1: on a CPU-only host the trainer must import cleanly and give a
+        clear SystemExit from main(), not ModuleNotFoundError at line 1."""
+        import subprocess
+        code = (
+            "import sys; sys.modules['torch_xla'] = None\n"  # simulate absence even if installed
+            "import importlib.util, os\n"
+            "spec = importlib.util.spec_from_file_location('train_xla', os.path.join(%r, 'src', 'train_xla.py'))\n"
+            "m = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(m)\n"
+            "assert m.xm is None or m.xm is not None  # import survived\n"
+            "print('IMPORT_OK')\n"
+        ) % ROOT
+        r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        assert "IMPORT_OK" in r.stdout, f"trainer import must survive missing torch_xla:\n{r.stderr[-500:]}"
+
+    def test_forget_arm_rejects_global_bf16_env(self, monkeypatch):
+        """B7: forget_alpha != 0 + XLA_USE_BF16=1 must fail fast (bf16 cumsum
+        silently swallows forgetting steps near |S|~200)."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "train_xla_b7", os.path.join(ROOT, "src", "train_xla.py"))
+        mod = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(mod)
+        except SystemExit:
+            pytest.skip("trainer refused to import in this env")
+        cfg = {"seed": 1, "save_dir": "/tmp/x", "train_path": "a", "val_path": "b",
+               "batch_size_per_device": 1, "eval_batch_size_per_device": 1,
+               "grad_accum": 1, "max_steps": 1, "lr": 1e-4, "min_lr": 1e-5,
+               "warmup": 0, "model": {"forget_alpha": 1.0}}
+        monkeypatch.setenv("XLA_USE_BF16", "1")
+        with pytest.raises(ValueError, match="fp32 cumsum"):
+            mod.validate_config(cfg)
+        monkeypatch.delenv("XLA_USE_BF16")
+        monkeypatch.setenv("XLA_DOWNCAST_BF16", "1")
+        with pytest.raises(ValueError, match="fp32 cumsum"):
+            mod.validate_config(cfg)
+
+    def test_experiment_card_declares_mechanism_sets(self):
+        """B6: EXPERIMENT_CARD must state which mechanisms each shipped config
+        actually activates (capacity != default arm)."""
+        card = open(os.path.join(ROOT, "docs", "EXPERIMENT_CARD.md"), encoding="utf-8").read()
+        assert "Active mechanism sets per config" in card
+        assert "capacity, not the" in card.replace("\n", " ")
+
+    def test_theory_has_rope_phase_commutation(self):
+        """A4 (Nanda): the before/after-RoPE ordering question is settled by
+        Corollary 7.1, and the numeric claim in it must be true."""
+        theory = open(os.path.join(ROOT, "docs", "THEORY.md"), encoding="utf-8").read()
+        assert "Corollary 7.1" in theory
+        import math, torch
+        from src.model import GPT, GPTConfig
+        torch.manual_seed(0)
+        cfg = GPTConfig(block_size=32, vocab_size=64, n_layer=1, n_head=2, n_embd=32,
+                        gradient_checkpointing=False, use_rope=True, use_wpe=False,
+                        phase_mult=0.3)
+        a = GPT(cfg).transformer.h[0].attn
+        B, H, T, hs = 2, 2, 16, 16
+        q = torch.randn(B, H, T, hs)
+        pos = torch.arange(T, dtype=torch.float32)
+        rope_ang = torch.einsum("t,k->tk", pos, a.rope_inv_freq).view(1, 1, T, hs // 2)
+        ph_ang = 0.3 * math.pi * torch.randn(B, H, T, hs // 2)
+
+        def rot(x, ang):
+            return a._rotate_pairwise(x, torch.cos(ang), torch.sin(ang))
+
+        q_rope_then_phase = rot(rot(q, rope_ang), ph_ang)
+        q_phase_then_rope = rot(rot(q, ph_ang), rope_ang)
+        q_sum = rot(q, rope_ang + ph_ang)
+        assert (q_rope_then_phase - q_phase_then_rope).abs().max() < 1e-5
+        assert (q_rope_then_phase - q_sum).abs().max() < 1e-5
+
+
+class TestFinalHardening:
+    """Final 'fix it so it stays fixed' round: every analysis entrypoint must
+    work on a CPU-only, memory-constrained host (the post-hoc analysis
+    environment), and artifact dirs must be untrackable."""
+
+    def test_prepare_c4_help_works_without_data_deps(self):
+        """--help must not require tiktoken/datasets/tqdm (same class as B1)."""
+        import subprocess
+        code = ("import sys\n"
+                "for m in ('tiktoken','datasets','tqdm'):\n"
+                "    sys.modules[m] = None\n"  # simulate absence
+                "import runpy, sys as s\n"
+                "s.argv = ['prepare_c4_data.py', '--help']\n"
+                "try:\n"
+                "    runpy.run_path(%r, run_name='__main__')\n"
+                "except SystemExit as e:\n"
+                "    raise SystemExit(0 if e.code in (0, None) else 1)\n"
+                % os.path.join(ROOT, "scripts", "prepare_c4_data.py"))
+        r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        assert r.returncode == 0, f"--help must survive missing data deps:\n{r.stderr[-400:]}"
+
+    def test_analysis_scripts_default_device_is_auto(self):
+        """post-hoc analysis runs on CPU hosts: default --device xla crashed
+        with ModuleNotFoundError before this round."""
+        for rel in ("scripts/analyze_checkpoint.py", "scripts/compare_attention_kl.py"):
+            src = open(os.path.join(ROOT, rel)).read()
+            assert 'default="auto"' in src, f"{rel}: --device default must be auto"
+            assert 'if name == "auto"' in src, f"{rel}: resolve_device must handle auto"
+
+    def test_compare_kl_clamps_seq_len(self):
+        src = open(os.path.join(ROOT, "scripts/compare_attention_kl.py")).read()
+        assert 'min(int(seq_len), int(cfg["model"]["block_size"]))' in src, (
+            "unclamped --seq-len crashed on block_size+1 sequences")
+
+    def test_divergence_micro_batches(self):
+        """plot_divergence held two (B,T,vocab) fp32 logit tensors -> OOM 137
+        on small hosts; must accumulate per-row."""
+        src = open(os.path.join(ROOT, "scripts/plot_divergence.py")).read()
+        assert "for i in range(n_rows)" in src
+        assert "kl_sum" in src and "nb2" in src, "cosine must be accumulated, not materialized"
+
+    def test_induction_by_distance_micro_chunks(self):
+        src = open(os.path.join(ROOT, "scripts/analyze_checkpoint.py")).read()
+        assert "for s in range(0, batch_size, chunk)" in src, (
+            "batch=16 forward materializes (16,T,vocab) logits -> OOM")
+
+    def test_analyze_checkpoint_has_knockout_curve(self):
+        """The long-context evidence figure must be produced by the standard
+        checkpoint analysis, not require custom code at paper time."""
+        src = open(os.path.join(ROOT, "scripts/analyze_checkpoint.py")).read()
+        assert "knockout_by_context_length" in src
+        assert "prefix_matching" in src
+
+    def test_make_plots_has_mechanism_dashboard(self):
+        """Every diagnostic CSV column family must be plottable out of the box."""
+        src = open(os.path.join(ROOT, "scripts/make_plots.py")).read()
+        assert "mechanism_dashboard" in src
+        for col in ("qk_interference", "distractor_margin", "mech_grad_mean",
+                    "qtemp_sat_frac", "layer_temp_last", "svd_phase_erank"):
+            assert col in src, f"dashboard must cover {col}"
+
+    def test_gitignore_blocks_experiment_artifacts(self):
+        """Token files are ~21 GB; a stray `git add -A` after data prep must
+        not be able to commit them."""
+        gi = open(os.path.join(ROOT, ".gitignore")).read()
+        for pat in ("data/", "runs/", "inits/", "*.pt", "*.bin"):
+            assert f"\n{pat}\n" in gi or gi.endswith(f"\n{pat}") or f"\n{pat}\n" in gi + "\n", (
+                f".gitignore must contain {pat}")
+
+    def test_citation_version_matches_pyproject(self):
+        import re as _re
+        cff = open(os.path.join(ROOT, "CITATION.cff")).read()
+        pyp = open(os.path.join(ROOT, "pyproject.toml")).read()
+        cff_v = _re.search(r'^version: "([\d.]+)"', cff, _re.M).group(1)
+        pyp_v = _re.search(r'^version = "([\d.]+)"', pyp, _re.M).group(1)
+        assert pyp_v.startswith(cff_v), (
+            f"CITATION.cff version {cff_v} vs pyproject {pyp_v} - keep in sync")
+
+
+class TestRound5Hardening:
+    """Fifth sweep: config typo guard, CRLF hygiene, CI e2e helpers."""
+
+    def _load_trainer(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "train_xla_r5", os.path.join(ROOT, "src", "train_xla.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_unknown_top_level_key_rejected(self):
+        """A typo like warmup_steps (vs warmup) silently fell back to defaults
+        and trained with wrong hyperparameters. Must raise, checked BEFORE
+        file-existence so it fires on any host."""
+        mod = self._load_trainer()
+        cfg = {"seed": 1, "save_dir": "s", "train_path": "t", "val_path": "v",
+               "batch_size_per_device": 1, "eval_batch_size_per_device": 1,
+               "grad_accum": 1, "max_steps": 1, "lr": 1e-4, "min_lr": 1e-5,
+               "warmup": 0, "model": {}, "warmup_steps": 500}
+        with pytest.raises(KeyError, match="Unknown top-level config keys"):
+            mod.validate_config(cfg)
+
+    def test_unknown_key_escape_hatch(self):
+        mod = self._load_trainer()
+        assert "allow_unknown_config_keys" in mod.KNOWN_TOP_LEVEL_KEYS
+
+    def test_every_known_key_is_actually_used(self):
+        """The allow-list must not drift: every KNOWN key (minus meta) must
+        appear in the trainer source, else it's a stale entry."""
+        mod = self._load_trainer()
+        src = open(os.path.join(ROOT, "src", "train_xla.py")).read()
+        meta = {"allow_unknown_config_keys", "_doc", "variant"}
+        for key in mod.KNOWN_TOP_LEVEL_KEYS - meta:
+            assert f'"{key}"' in src, f"stale KNOWN_TOP_LEVEL_KEYS entry: {key}"
+
+    def test_shipped_configs_have_no_unknown_keys(self):
+        """Every shipped config must pass the new guard (keys subset check
+        only - paths may not exist on CI)."""
+        import glob as _glob
+        mod = self._load_trainer()
+        for path in sorted(_glob.glob(os.path.join(ROOT, "configs", "*.json"))):
+            cfg = json.load(open(path))
+            unknown = set(cfg) - mod.KNOWN_TOP_LEVEL_KEYS
+            assert not unknown, f"{os.path.basename(path)}: unknown keys {unknown}"
+
+    def test_no_crlf_in_tracked_text_files(self):
+        """CRLF snuck in via web uploads (prepare_data.py, utils.py) - breaks
+        patches and produces noisy diffs. .gitattributes now enforces LF; this
+        test keeps the tree itself clean."""
+        import glob as _glob
+        bad = []
+        for pattern in ("src/*.py", "scripts/*.py", "tests/*.py", "docs/*.md",
+                        "*.md", "*.toml", "*.txt", ".github/workflows/*.yml"):
+            for f in _glob.glob(os.path.join(ROOT, pattern)):
+                if b"\r\n" in open(f, "rb").read():
+                    bad.append(os.path.relpath(f, ROOT))
+        assert not bad, f"CRLF line endings in: {bad}"
+
+    def test_gitattributes_enforces_lf(self):
+        ga = os.path.join(ROOT, ".gitattributes")
+        assert os.path.exists(ga), ".gitattributes must exist (LF enforcement)"
+        content = open(ga).read()
+        assert "eol=lf" in content
+
+    def test_ci_check_analysis_script(self, tmp_path):
+        """CI e2e gate helper: accepts a good analysis JSON, rejects broken."""
+        import subprocess
+        good = {"val_loss": 10.9, "induction_by_distance": {}, "prefix_matching": {},
+                "attention_entropy": [], "knockout_by_context_length": {"64": {"loss_full": 10.9}}}
+        p = tmp_path / "good.json"
+        p.write_text(json.dumps(good))
+        r = subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "ci_check_analysis.py"), str(p)],
+                           capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout + r.stderr
+        bad = dict(good); del bad["knockout_by_context_length"]
+        p2 = tmp_path / "bad.json"
+        p2.write_text(json.dumps(bad))
+        r2 = subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "ci_check_analysis.py"), str(p2)],
+                            capture_output=True, text=True)
+        assert r2.returncode != 0
+
+    def test_ci_workflow_has_cli_and_e2e_smoke(self):
+        wf = open(os.path.join(ROOT, ".github", "workflows", "tests.yml")).read()
+        assert "CLI smoke" in wf, "CI must gate every script's --help"
+        assert "E2E pipeline smoke" in wf, "CI must run the dummy-data pipeline"
+        assert "ci_check_analysis.py" in wf

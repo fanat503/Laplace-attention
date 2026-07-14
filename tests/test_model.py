@@ -43,13 +43,15 @@ def small_cfg(**kw) -> GPTConfig:
 
 HLA_KW = dict(
     phase_mult=0.15, use_laplace=True, laplace_alpha=1.0,
-    use_rope=True, use_distance_laplace=True, distance_laplace_alpha=0.25,
+    use_rope=True, use_wpe=False,
+    use_distance_laplace=True, distance_laplace_alpha=0.25,
     use_salience_bias=True, salience_alpha=1.0,
     layer_dependent_gate=True,
 )
 BASE_KW = dict(
     phase_mult=0.0, use_laplace=True, laplace_alpha=0.0,
-    use_rope=True, use_distance_laplace=True, distance_laplace_alpha=0.0,
+    use_rope=True, use_wpe=False,
+    use_distance_laplace=True, distance_laplace_alpha=0.0,
     use_salience_bias=True, salience_alpha=0.0,
     layer_dependent_gate=True,
 )
@@ -269,8 +271,8 @@ class TestPositionalEncoding:
         assert float(diff) > 1e-4, "RoPE model must be position-sensitive"
 
     def test_param_match_rope_pair(self):
-        base = GPT(small_cfg(**BASE_KW, use_wpe=False))
-        hla = GPT(small_cfg(**HLA_KW, use_wpe=False))
+        base = GPT(small_cfg(**BASE_KW))
+        hla = GPT(small_cfg(**HLA_KW))
         assert base.parameter_count() == hla.parameter_count()
 
 
@@ -1018,8 +1020,20 @@ class TestDistanceGateDeconfound:
 
     def test_mechanisms_can_disagree(self):
         """The expressivity the old sharing forbade: a key can be LOUD (gate_k
-        up) yet SHORT-range (gate_d down) simultaneously."""
+        up) yet SHORT-range (gate_d down) simultaneously.
+
+        Determinism note: with W_gate_d filled to a huge value, tanh saturates
+        to sign(sum(x)) per token, so the MEAN bias sign depends on the random
+        embedding draw - this test silently relied on ambient RNG state left
+        by earlier tests (latent flakiness exposed when the B4 dual-PE fix
+        changed fixture construction order). Fix: force all embeddings
+        positive so sum(x) > 0 for every token, making the saturated gate
+        exactly -1 everywhere - deterministic for any RNG state."""
         model = GPT(small_cfg(**self.DKW, n_layer=1)).eval()
+        with torch.no_grad():
+            model.transformer.wte.weight.abs_()
+            if model.config.use_wpe:
+                model.transformer.wpe.weight.abs_()
         model.set_diagnostics(enabled=True)
         with torch.no_grad():
             model.transformer.h[0].attn.W_gate_k.weight.fill_(1000.0)   # loud
