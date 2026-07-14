@@ -40,9 +40,28 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
 import numpy as np
-import tiktoken
-from datasets import load_dataset
-from tqdm import tqdm
+
+# Data-prep deps are optional extras (see requirements.txt): keep --help and
+# imports working on hosts without them, fail with a clear message on use.
+try:
+    import tiktoken
+    from datasets import load_dataset
+    from tqdm import tqdm
+except ImportError as _e:  # pragma: no cover
+    tiktoken = None
+    load_dataset = None
+    tqdm = None
+    _IMPORT_ERROR = _e
+else:
+    _IMPORT_ERROR = None
+
+
+def require_data_deps() -> None:
+    if _IMPORT_ERROR is not None:
+        raise SystemExit(
+            f"Missing data-prep dependency: {_IMPORT_ERROR}\n"
+            "Install with: pip install datasets tiktoken tqdm"
+        )
 
 
 def atomic_write_json(path: str | os.PathLike[str], payload: Dict[str, Any]) -> None:
@@ -196,6 +215,7 @@ def main() -> None:
     ap.add_argument("--no-eos", action="store_true")
     ap.add_argument("--full-hash", action="store_true", help="Compute full SHA256 of output files; slower")
     args = ap.parse_args()
+    require_data_deps()
 
     if args.revision is None:
         print("WARNING: --revision not set. For NeurIPS-grade runs, pin a HuggingFace commit hash.")

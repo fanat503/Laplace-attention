@@ -24,6 +24,15 @@ from src.model import GPT, GPTConfig  # noqa: E402
 
 
 def resolve_device(name: str):
+    # Final polish: default "auto" - use XLA when available, else CPU. The old
+    # default "xla" crashed with ModuleNotFoundError on any CPU host, which is
+    # exactly where post-hoc analysis usually runs.
+    if name == "auto":
+        try:
+            import torch_xla.core.xla_model as xm
+            return xm.xla_device()
+        except ImportError:
+            return torch.device("cpu")
     if name == "xla":
         import torch_xla.core.xla_model as xm
 
@@ -48,6 +57,10 @@ def load_model(ckpt: str, config: str | None, device: str) -> tuple[GPT, Dict[st
 
 
 def iter_val(cfg: Dict[str, Any], seq_len: int, batch_size: int, batches: int, device: str):
+    # Same clamp as analyze_checkpoint (silent-shape bug class): the dataset
+    # yields block_size+1 tokens, so an unclamped --seq-len > block_size fed
+    # sequences longer than the model's block and crashed the forward.
+    seq_len = min(int(seq_len), int(cfg["model"]["block_size"]))
     ds = FixedDataset(cfg["val_path"], cfg["model"]["block_size"], expected_vocab_size=cfg.get("expected_vocab_size", cfg["model"].get("vocab_size")))
     for i in range(min(batches, len(ds) // batch_size)):
         xs = [ds[i * batch_size + j]["input_ids"][:seq_len] for j in range(batch_size)]
@@ -62,7 +75,7 @@ def main() -> None:
     ap.add_argument("--base-config", default=None)
     ap.add_argument("--hla-config", default=None)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--device", default="xla")
+    ap.add_argument("--device", default="auto", help="auto|xla|cpu|cuda (auto = xla if available, else cpu)")
     ap.add_argument("--seq-len", type=int, default=256)
     ap.add_argument("--batch-size", type=int, default=1)
     ap.add_argument("--batches", type=int, default=8)

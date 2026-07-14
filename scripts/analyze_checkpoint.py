@@ -40,6 +40,15 @@ def load_json(path: str) -> Dict[str, Any]:
 
 
 def resolve_device(name: str):
+    # Final polish: default "auto" - use XLA when available, else CPU. The old
+    # default "xla" crashed with ModuleNotFoundError on any CPU host, which is
+    # exactly where post-hoc analysis usually runs.
+    if name == "auto":
+        try:
+            import torch_xla.core.xla_model as xm
+            return xm.xla_device()
+        except ImportError:
+            return torch.device("cpu")
     if name == "xla":
         import torch_xla.core.xla_model as xm
 
@@ -231,9 +240,18 @@ def induction_by_distance(model: GPT, cfg: Dict[str, Any], *, distances: List[in
             toks[i, pos_a2] = a
             targets.append(b)
         target = torch.tensor(targets, device=device)
-        logits, _ = model(toks)
-        probs = torch.softmax(logits[:, pos_a2, :].float(), dim=-1)
-        out[str(dist)] = float(probs.gather(1, target[:, None]).mean().detach().cpu().item())
+        # Memory fix (final polish): a single forward at batch=16 materializes
+        # logits (16, T, vocab) fp32 ~= 0.4-0.7 GB and OOMs small hosts. The
+        # probe only needs ONE position per row - run in micro-chunks of 4 and
+        # keep just that column. Peak drops ~4x with identical results.
+        chunk = 4
+        vals = []
+        for s in range(0, batch_size, chunk):
+            logits, _ = model(toks[s:s + chunk])
+            probs = torch.softmax(logits[:, pos_a2, :].float(), dim=-1)
+            vals.append(probs.gather(1, target[s:s + chunk, None]))
+            del logits, probs
+        out[str(dist)] = float(torch.cat(vals).mean().detach().cpu().item())
     return out
 
 
@@ -286,12 +304,35 @@ def residual_geometry_metrics(model: GPT, cfg: Dict[str, Any], *, seq_len: int, 
     return {"residual_geometry": layers}
 
 
+@torch.no_grad()
+def knockout_by_context_length(model: GPT, cfg: Dict[str, Any], *, lengths: List[int], device: str) -> Dict[str, Dict[str, float]]:
+    """Causal knockout (src.eval.mechanism_knockout) at several context lengths.
+
+    THE long-context figure: for each mechanism, delta-loss from silencing it,
+    as a function of how much context the batch has. A mechanism whose delta
+    GROWS with length is causally carrying long-range structure - this curve
+    is the quantitative evidence behind the long-context claim (knockout is
+    measurement-only; the mechanism stays on in deployment).
+    """
+    from src.eval import mechanism_knockout
+    out: Dict[str, Dict[str, float]] = {}
+    block = int(cfg["model"]["block_size"])
+    for T in lengths:
+        T = max(8, min(int(T), block))
+        got = None
+        for x, y in iter_val_batches(cfg, seq_len=T, batch_size=1, max_batches=1, device=device):
+            got = mechanism_knockout(model, x, y)
+        if got is not None:
+            out[str(T)] = {k: float(v) for k, v in got.items()}
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--checkpoint", required=True)
     ap.add_argument("--config", default=None)
     ap.add_argument("--out", required=True)
-    ap.add_argument("--device", default="xla")
+    ap.add_argument("--device", default="auto", help="auto|xla|cpu|cuda (auto = xla if available, else cpu)")
     ap.add_argument("--seq-len", type=int, default=256)
     ap.add_argument("--batch-size", type=int, default=1)
     ap.add_argument("--batches", type=int, default=8)
@@ -306,6 +347,13 @@ def main() -> None:
     result["induction_by_distance"] = induction_by_distance(model, cfg, distances=[10, 25, 50, 100, 200], batch_size=16, device=device)
     result.update(attention_and_hook_metrics(model, cfg, seq_len=args.seq_len, batch_size=args.batch_size, batches=args.batches, device=device))
     result.update(residual_geometry_metrics(model, cfg, seq_len=args.seq_len, batch_size=args.batch_size, batches=max(1, args.batches // 2), device=device))
+    result["knockout_by_context_length"] = knockout_by_context_length(
+        model, cfg, lengths=[args.seq_len // 4, args.seq_len // 2, args.seq_len], device=device)
+    try:
+        from src.eval import prefix_matching_score
+        result["prefix_matching"] = prefix_matching_score(model, device=device, batch_size=1)
+    except Exception as e:  # vocab too small etc.
+        result["prefix_matching"] = {"error": str(e)}
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as f:
