@@ -219,3 +219,13 @@ __marimo__/
 
 # patches are applied, never committed
 *.patch
+
+# Experiment artifacts: never commit tokens, checkpoints, run outputs
+# (dummy data smoke-writes into data/; a 200m C4 prep is ~21 GB)
+data/
+runs/
+inits/
+*.pt
+*.bin
+*.csv
+flops_profile.json
