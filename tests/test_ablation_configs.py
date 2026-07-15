@@ -626,3 +626,94 @@ class TestRound5Hardening:
         assert "CLI smoke" in wf, "CI must gate every script's --help"
         assert "E2E pipeline smoke" in wf, "CI must run the dummy-data pipeline"
         assert "ci_check_analysis.py" in wf
+
+
+class TestRound6Science:
+    """Round 6 (top-reviewer pass): numerical semantics and doc-code parity."""
+
+    def test_distance_bias_normalized_by_model_constant(self):
+        """The distance bias must use block_size-1 (model constant), not the
+        current batch length: T-normalization broke prefix-stability the
+        moment W_gate_d trained (full-vs-prefix diff ~4e-3)."""
+        src = open(os.path.join(ROOT, "src", "model.py")).read()
+        assert "self.block_size - 1" in src, "distance must normalize by block_size-1"
+        import torch
+        from src.model import GPT, GPTConfig
+        torch.manual_seed(0)
+        m = GPT(GPTConfig(block_size=64, vocab_size=128, n_layer=1, n_head=2,
+                          n_embd=32, gradient_checkpointing=False,
+                          use_rope=True, use_wpe=False,
+                          use_distance_laplace=True, distance_laplace_alpha=0.5)).eval()
+        with torch.no_grad():
+            m.transformer.h[0].attn.W_gate_d.weight.normal_(0, 0.5)
+        x = torch.randint(0, 128, (1, 32))
+        full, _ = m(x)
+        prefix, _ = m(x[:, :16])
+        assert torch.allclose(full[0, :16], prefix[0], atol=1e-5), (
+            "distance bias must be prefix-stable for a trained gate")
+
+    def test_theory_defines_distance_normalization(self):
+        theory = open(os.path.join(ROOT, "docs", "THEORY.md"), encoding="utf-8").read()
+        assert "block_size−1" in theory or "block_size-1" in theory, (
+            "THEORY must define d(i,j) including its normalization constant")
+
+    def test_metrics_documents_every_csv_column(self):
+        """Every diagnostic column the trainer writes must be documented in
+        METRICS.md - the paper appendix is generated from it."""
+        import re as _re
+        src = open(os.path.join(ROOT, "src", "train_xla.py")).read()
+        m = _re.search(r'writer\.writerow\(\[\s*"step",(.*?)\]\)', src, _re.S)
+        cols = _re.findall(r'"([a-z_0-9]+)"', '"step",' + m.group(1))
+        doc = open(os.path.join(ROOT, "docs", "METRICS.md"), encoding="utf-8").read()
+        core = {"step", "tokens_seen", "lr", "val_tokens", "steps_per_sec",
+                "tokens_per_sec", "wall_time_sec", "eta_hours", "best_val",
+                "phase_norm", "induction", "entropy", "train_loss", "val_loss",
+                "val_ppl", "grad_norm"}
+        undocumented = [c for c in cols if c not in core and f"`{c}`" not in doc
+                        and not any(f"`{c.rsplit('_', 1)[0]}_" in line and c.rsplit('_', 1)[1] in line
+                                    for line in doc.splitlines() if "`" in line)]
+        assert not undocumented, f"CSV columns missing from METRICS.md: {undocumented}"
+
+    def test_audit_envelope_matches_model_envelope(self):
+        """The E1/E3 audit formula and the actual model envelope must agree
+        numerically at saturation (audit is only useful if it audits the real
+        model)."""
+        import json as _json, math as _m, torch
+        from src.model import GPT, GPTConfig
+        m_cfg = _json.load(open(os.path.join(ROOT, "configs", "200m_hla_v2_s42.json")))["model"]
+        small = dict(m_cfg)
+        small.update(block_size=64, vocab_size=256, n_layer=1, n_head=2,
+                     n_embd=32, gradient_checkpointing=False)
+        model = GPT(GPTConfig(**small)).eval()
+        with torch.no_grad():
+            model.transformer.h[0].attn.W_gate_k.weight.fill_(1000.0)
+            model.transformer.h[0].attn.W_range_k.fill_(1000.0)
+        model.set_diagnostics(enabled=True)
+        model(torch.randint(0, 256, (1, 48)))
+        attn = model.transformer.h[0].attn
+        flex = 1.0 + m_cfg.get("range_flex", 0.25)
+        lm = attn.layer_gate_multiplier
+        eff = min(m_cfg["laplace_alpha"] * m_cfg["laplace_range_k"] * flex * lm,
+                  m_cfg["k_log_clip"] * lm)
+        hi_pred = (1 - m_cfg["beta_k"]) + m_cfg["beta_k"] * _m.exp(eff)
+        assert abs(hi_pred - float(attn.last_mix_k.max())) < 1e-3
+
+    def test_dataloader_deterministic_across_workers(self):
+        """Sterility: batch order must not depend on num_workers."""
+        import subprocess, torch
+        subprocess.run([sys.executable, os.path.join(ROOT, "scripts", "make_dummy_data.py")],
+                       capture_output=True, cwd=ROOT)
+        from src.data import FixedDataset, fixed_token_collate, worker_init_fn
+        from torch.utils.data import DataLoader
+
+        def first(nw):
+            ds = FixedDataset(os.path.join(ROOT, "data", "train_fixed_tokens.pt"), 128)
+            dl = DataLoader(ds, batch_size=4, num_workers=nw, shuffle=False,
+                            collate_fn=fixed_token_collate, worker_init_fn=worker_init_fn)
+            out = []
+            for i, b in enumerate(dl):
+                out.append(b["input_ids"].clone())
+                if i >= 1:
+                    break
+            return torch.cat(out)
+        assert torch.equal(first(0), first(2))

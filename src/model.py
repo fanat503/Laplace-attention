@@ -116,6 +116,7 @@ class CausalSelfAttention(nn.Module):
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         self.head_dim = config.n_embd // config.n_head
+        self.block_size = int(config.block_size)
         self.layer_idx = int(layer_idx)
         self.n_layer = int(config.n_layer)
         self.phase_mult = config.phase_mult
@@ -564,7 +565,16 @@ class CausalSelfAttention(nn.Module):
             # SHORT-range). Identity-init preserved: W_gate_d = 0.
             gate_d = torch.tanh(self.W_gate_d(x)).float()  # (B, T, H)
             pos = torch.arange(T, device=x.device)
-            dist = (pos[:, None] - pos[None, :]).clamp_min(0).float() / float(max(1, T - 1))
+            # SCIENTIFIC FIX (round 6): normalize by the model constant
+            # block_size-1, NOT by the current batch length T-1. The old
+            # T-normalization made the bias for the SAME (i,j) pair depend on
+            # how much context happened to be in the batch - breaking
+            # prefix-stability (KV-cache correctness) the moment W_gate_d is
+            # trained: full-vs-prefix logits diverged by ~4e-3. Training is
+            # unaffected bit-for-bit (FixedDataset always yields T==block_size),
+            # so existing checkpoints stay valid; inference at shorter T is now
+            # consistent with training semantics.
+            dist = (pos[:, None] - pos[None, :]).clamp_min(0).float() / float(max(1, self.block_size - 1))
             key_gate = gate_d.transpose(1, 2).unsqueeze(2)  # (B,H,1,T_key)
             dist_bias = (
                 self.distance_laplace_alpha
