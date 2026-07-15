@@ -298,16 +298,32 @@ class TestKVCacheCompatibility:
 
     def test_logits_prefix_stable(self):
         """The decisive cache test: logits at position t computed from a
-        prefix equal logits at t from the full sequence."""
-        model = GPT(cfg(**ALL_ON)).eval()
+        prefix equal logits at t from the full sequence.
+
+        HARDENED (round 6): randomize EVERY mechanism weight. The original
+        version left W_gate_d at identity zero - which hid a real prefix
+        -stability bug: the distance bias normalized by the CURRENT batch
+        length (T-1) instead of the model constant (block_size-1), so the
+        same (i,j) pair got a different bias depending on batch length
+        (full-vs-prefix logit diff ~4e-3 once W_gate_d was nonzero).
+        A probe is only as good as the weights it excites."""
+        model = GPT(cfg(**ALL_ON, use_qtemp=True, qtemp_alpha=1.0)).eval()
         with torch.no_grad():
             for blk in model.transformer.h:
                 blk.attn.W_phase_q.normal_(0, 0.2)
+                blk.attn.W_phase_k.normal_(0, 0.2)
+                blk.attn.W_gate_k.weight.normal_(0, 0.3)
+                blk.attn.W_gate_v.weight.normal_(0, 0.3)
+                blk.attn.W_gate_sal.weight.normal_(0, 0.3)
                 blk.attn.W_gate_f.weight.normal_(0, 0.2)
+                blk.attn.W_gate_d.weight.normal_(0, 0.5)   # <- the one that hid the bug
+                blk.attn.W_qtemp.weight.normal_(0, 0.3)
         x = torch.randint(0, 256, (1, 32))
         l_prefix, _ = model(x[:, :20])
         l_full, _ = model(x)
-        assert torch.allclose(l_prefix[0, 19], l_full[0, 19], atol=1e-5)
+        assert torch.allclose(l_prefix[0, 19], l_full[0, 19], atol=1e-5), (
+            "prefix logits must equal full-sequence logits at the same "
+            "position for EVERY active mechanism (KV-cache correctness)")
 
 
 class TestTheorem8PairingEquivalence:

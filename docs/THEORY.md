@@ -60,7 +60,7 @@ with the components (all zero / identity at initialization):
 | u_j | (1−β_v) + β_v·exp(clamp(α·tanh(W_gv x_j)·r_v, ±c_v)) | V-gate | **1** |
 | B_ij | b^sal_j + b^dist_ij + (S_i − S_j) | additive biases | **0** |
 | b^sal_j | clamp(α_s·r_s·tanh(W_s x_j), ±c_s) | salience | 0 |
-| b^dist_ij | clamp(α_d·r_d·λ_l·d(i,j)·tanh(W_gd x_j), ±c_d) — W_gd is distance's OWN gate (deconfounded from the K-gate) | distance | 0 |
+| b^dist_ij | clamp(α_d·r_d·λ_l·d(i,j)·tanh(W_gd x_j), ±c_d) — W_gd is distance's OWN gate (deconfounded from the K-gate); d(i,j) = (i−j)/(block_size−1) ∈ [0,1], normalized by the MODEL constant (not the batch length) so the bias for a fixed pair is independent of how much context is in the batch — prefix-stable, hence KV-cache-exact (tested) | distance | 0 |
 | τ_i | exp(clamp(α_q·r_q·tanh(W_qt x_i), ±c_q)) — per-query softmax temperature (SSA/SSMax family; the only non-no-op Q-side score form, since an additive per-query bias cancels in softmax) | Q-temp | **1** |
 | S_i − S_j | S_t = Σ_{τ≤t} α_f·r_f·tanh(W_f x_τ), clamped | forget (FoX-family) | 0 |
 | ρ_h | 1 + tanh(s_h) — per-head phase budget | head adaptivity | 1 |

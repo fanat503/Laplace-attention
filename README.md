@@ -45,7 +45,7 @@ git clone https://github.com/fanat503/Laplace-attention.git
 cd Laplace-attention
 pip install -r requirements.txt        # torch (CPU is enough), numpy, pytest
 
-python -m pytest tests/ -q             # → 251 passed, CPU-only, ~1 min
+python -m pytest tests/ -q             # → 256 passed, CPU-only, ~1 min
 python scripts/audit_sterility.py      # → STERILITY AUDIT PASSED
 ```
 
@@ -75,7 +75,7 @@ Recommended ladder before any long run: `smoke` (10 steps), then `pilot` (1000) 
 
 ## Why trust the comparison
 
-The methodology is designed so that cheating is hard, and each guarantee is an executable test rather than a promise — 251 tests ([protocol & threat model](docs/STERILITY.md)):
+The methodology is designed so that cheating is hard, and each guarantee is an executable test rather than a promise — 256 tests ([protocol & threat model](docs/STERILITY.md)):
 
 - **Same start** — shared backbone weights (tensor-equal), HLA params zeroed, bit-exact logits at init;
 - **Same size** — every mechanism module exists in the base too (α = 0, frozen, counted);
@@ -94,7 +94,7 @@ Training logs record interference metrics (specifically, whether retrieval clari
 ├── scripts/      validation (validate_configs, audit_*) · experiment (make_ablation_configs,
 │                 prepare_c4_data) · analysis (profile_flops, make_plots, analyze_*)
 ├── docs/         THEORY · METRICS · STERILITY · EXPERIMENT_CARD · DATA_CARD
-└── tests/        7 files · 251 tests · CPU-only
+└── tests/        7 files · 256 tests · CPU-only
 ```
 
 CI runs the full suite plus three audits on every push.

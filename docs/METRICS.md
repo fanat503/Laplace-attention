@@ -47,6 +47,18 @@ At the query position (the second [A]) take the softmax distribution p(·):
 
 **Why it exists**: val loss averages over everything and can hide selective-attention gains. If HLA's salience/K-gates really suppress irrelevant-but-attractive keys, the HLA `distractor_margin` curve must rise faster than base. It is the *behavioral* half of the decoupling evidence; interference metrics (below) are the *structural* half.
 
+## 2b. Mechanism activity means (per-eval CSV columns)
+
+Cheap per-layer means captured on the diagnostics forward and averaged over
+layers — the "is it alive and how loud" counterpart to the saturation
+fractions of §3:
+
+| Metric | Quantity | Read |
+|---|---|---|
+| `angle_q_abs_mean`, `angle_k_abs_mean` | mean \|angle\| of the content phase rotation (radians) | 0 at identity; growth = the phase channel is being used. Compare against the π·phase_mult budget |
+| `gate_k_mean`, `gate_v_mean` | mean raw tanh gate value in [−1, 1] | sign = net amplify/suppress tendency; magnitude = how decisively the gate votes |
+| `mix_k_mean`, `mix_v_mean` | mean multiplicative mix applied to K/V | 1.0 at identity; sustained drift = net loudness change. Bounded by the Theorem-4 envelope (§8) |
+
 ## 3. Saturation metrics — "is the model hitting the walls?"
 
 Every bounded nonlinearity in HLA is a `tanh`. For each one we log the fraction of positions where it is essentially pinned:
