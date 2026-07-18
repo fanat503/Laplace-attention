@@ -33,10 +33,10 @@ Phase carries *where to look*; magnitude carries *what is said* — like a holog
 |---|---|---|
 | `R(θ_i)`, `R(φ_j)` | content-conditioned rotation of Q, K — learned matching geometry, composes with RoPE | `I` |
 | `m_j`, `u_j` | multiplicative K, V gates: key loudness and content volume | `1` |
-| `B_ij` | additive biases: salience  + content-conditioned distance decay + FoX-style forget gate (baseline arm) | `0` |
-| `τ_i` | per-query softmax temperature — how sharply each query listens | `1` |
+| `B_ij` | additive biases: salience  + content-conditioned distance decay + FoX-style gate (baseline) | `0` |
+| `τ_i` | per-query softmax temperature | `1` |
 
-Everything is per-head, tanh-bounded, causally safe, and **exactly zero at initialization**: an HLA model *is* a standard Transformer at step 0 (bit-exact in fp32 and bf16, verified). Full derivation, envelopes, and proofs: [`docs/THEORY.md`](docs/THEORY.md).
+Everything is per-head, tanh-bounded, causally safe, and **zero at initialization**: an HLA model *is* a standard Transformer at step 0 (in fp32 and bf16). Full derivation, envelopes, and proofs: [`docs/THEORY.md`](docs/THEORY.md).
 
 ## Getting started
 
@@ -75,13 +75,13 @@ Recommended ladder before any long run: `smoke` (10 steps), then `pilot` (1000) 
 
 ## Why trust the comparison
 
-The methodology is designed so that cheating is hard, and each guarantee is an executable test rather than a promise — 256 tests ([protocol & threat model](docs/STERILITY.md)):
+The methodology is designed so that cheating is hard — 256 tests ([protocol & threat model](docs/STERILITY.md)):
 
-- **Same start** — shared backbone weights (tensor-equal), HLA params zeroed, bit-exact logits at init;
+- **Same start** — shared backbone weights (tensor-equal), HLA params zeroed;
 - **Same size** — every mechanism module exists in the base too (α = 0, frozen, counted);
 - **Same data** — deterministic fixed-token pipeline, fingerprints, even sharding, sample-exact resume;
 - **Same knobs** — config validator rejects any undeclared difference; hyperparameters tuned on base only; HLA params excluded from weight decay (zero *is* their identity state);
-- **Measured honestly** — parameter-matched *and* FLOPs-matched pairs; mechanism compute overhead ~7% at 200M, reported.
+- **Measured honestly** — parameter-matched *and* FLOPs-matched pairs; mechanism compute overhead ~7% at 200M.
 
 Training logs record interference metrics (specifically, whether retrieval clarity improves while compositional capabilities are preserved), distractor induction margins, saturation fractions, spectral ranks, and per-mechanism gradient norms. Crucially, the figures presented in this paper are generated directly from these raw CSV logs rather than via post-hoc analysis. Checkpoint level causal probes, including mechanism knockouts and prefix matching scores, are documented in [`src/eval.py`](src/eval.py).
 
@@ -104,13 +104,13 @@ CI runs the full suite plus three audits on every push.
 <details>
 <summary><b>Isn't this what PoPE did?</b></summary>
 
-Almost the opposite. Both works identify the same object: a content-dependent phase term in the QK product that interferes with positional rotation. PoPE *deletes* it so position becomes clean; HLA *domesticates* it — learned, tanh-bounded, zero-initialized — as an extra retrieval coordinate, while RoPE keeps position.
+Almost the opposite. Both works identify the same object: a content-dependent phase term in the QK product that interferes with positional rotation. PoPE *deletes* it so position becomes clean; HLA *domesticates* it — learned, tanh-bounded, zero-initialized.
 </details>
 
 <details>
 <summary><b>Why is a Forgetting-Transformer-style gate in the codebase?</b></summary>
 
-As a baseline, clearly credited (Lin et al., ICLR 2025), OFF in every HLA config, activated only by the `forget` ablation arm. Re-implementing a competitor inside the same controlled harness is the only way to compare fairly — and enables the `base | FoX-style | HLA` three-way comparison from one shared init. But don't I need another one?
+As a baseline, clearly credited (Lin et al., ICLR 2025), OFF in every HLA config, activated only by the `forget` ablation arm. Re-implementing a competitor inside the same controlled harness is the only way to compare fairly — and enables the `base | FoX-style | HLA` three-way comparison from one shared init.
 </details>
 
 <details>
