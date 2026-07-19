@@ -10,15 +10,15 @@
 
 </div>
 
-Every attention head does two interconnected jobs with one set of vectors: **retrieval** (which tokens matter) and **transmission** (what they say). Because both share the residual stream, they interfere: one head's *output* lands in other heads' *retrieval* inputs as noise. HLA gives each job its own learned, channel.
+Every attention head does two interconnected jobs with one set of vectors: retrieval (which tokens matter) and transmission (what they say). Because both share the residual stream, they interfere. HLA gives each job its own channel.
 
 This repository contains:
 
-1. **The mechanism** — one modified attention equation, seven identity-initialized components ([`src/model.py`](src/model.py), single file);
-2. **A sterile comparison harness** — base and HLA train from the *same initial weights* on the *same data in the same order*, with parameter matching and config validation enforced by tests;
-3. **Theory and diagnostics** — 9 numerically verified theorems ([`docs/THEORY.md`](docs/THEORY.md)), causal knockout probes, interference and spectral metrics logged during training ([`docs/METRICS.md`](docs/METRICS.md)).
+1. **The mechanism** — one modified attention equation ([`src/model.py`](src/model.py), single file);
+2. **A sterile comparison harness** — base and HLA train from the same initial weights on the same data in the same order;
+3. **Theory and diagnostics** — verified theorems ([`docs/THEORY.md`](docs/THEORY.md)), causal knockout probes, interference and spectral metrics ([`docs/METRICS.md`](docs/METRICS.md)).
 
-**Status**: infrastructure complete and tested; sterile training runs are the current roadmap item. Earlier iterations showed a 0.09 validation loss gap at 100M — reproducing that inside the harness is the first experiment, not a claim.
+**Status**: infrastructure complete and tested. Earlier iterations showed a 0.09 validation loss gap at 100M — reproducing that inside the harness is the first experiment, not a claim.
 
 ## The idea in one formula
 
@@ -27,16 +27,16 @@ score_ij = ( τ_i · R(θ_i)·q_i ) · ( m_j · R(φ_j)·k_j ) / √d  +  B_ij
 out_i    = Σ_{j≤i} softmax_j(score_ij) · ( u_j · v_j )
 ```
 
-Phase carries *where to look*; magnitude carries *what is said* — like a hologram, where the image lives in phase interference, not intensity.
+Phase carries *where to look*; magnitude carries *what is said* — like a hologram.
 
 | Component | Role | At init |
 |---|---|---|
 | `R(θ_i)`, `R(φ_j)` | content-conditioned rotation of Q, K — learned matching geometry, composes with RoPE | `I` |
-| `m_j`, `u_j` | multiplicative K, V gates: key loudness and content volume | `1` |
+| `m_j`, `u_j` | multiplicative K, V gates| `1` |
 | `B_ij` | additive biases: salience  + content-conditioned distance decay + FoX-style gate (baseline) | `0` |
 | `τ_i` | per-query softmax temperature | `1` |
 
-Everything is per-head, tanh-bounded, causally safe, and **zero at initialization**: an HLA model *is* a standard Transformer at step 0 (in fp32 and bf16). Full derivation, envelopes, and proofs: [`docs/THEORY.md`](docs/THEORY.md).
+Full derivation, envelopes, and proofs: [`docs/THEORY.md`](docs/THEORY.md).
 
 ## Getting started
 
@@ -71,29 +71,28 @@ python scripts/make_ablation_configs.py \
     --outdir configs/ablations_200m --seeds 42 43 44
 ```
 
-Recommended ladder before any long run: smoke (10 steps), then pilot (1000 steps) and then full runs. We pre-registered our experimental design on [`docs/EXPERIMENT_CARD.md`](docs/EXPERIMENT_CARD.md).
+Recommended ladder before any long run: smoke (10 steps), then pilot (1000 steps) and then full runs. We wrote our experimental design on [`docs/EXPERIMENT_CARD.md`](docs/EXPERIMENT_CARD.md).
 
 ## Why trust the comparison
 
 The methodology is designed so that cheating is hard — 256 tests ([protocol & threat model](docs/STERILITY.md)):
 
-- **Same start** — shared backbone weights (tensor-equal), HLA params zeroed;
-- **Same size** — every mechanism module exists in the base too (α = 0, frozen, counted);
-- **Same data** — deterministic fixed-token pipeline, fingerprints, even sharding, sample-exact resume;
-- **Same knobs** — config validator rejects any undeclared difference; hyperparameters tuned on base only; HLA params excluded from weight decay (zero *is* their identity state);
-- **Measured honestly** — parameter-matched and FLOPs-matched pairs; mechanism compute overhead ~7% at 200M.
+- Same start — shared backbone weights;
+- Same size — every mechanism module exists in the base too (α = 0, frozen, counted);
+- Same data — deterministic fixed-token pipeline;
+- Same knobs — config validator rejects any difference;
+- Measured honestly — parameter-matched and FLOPs-matched pairs; mechanism compute overhead ~7% at 200M.
 
-Training logs record interference metrics (specifically, whether retrieval clarity improves while compositional capabilities are preserved), distractor induction margins, saturation fractions, spectral ranks, and per-mechanism gradient norms. Crucially, the figures presented in this paper are generated directly from these raw CSV logs rather than via post-hoc analysis. Checkpoint level causal probes, including mechanism knockouts and prefix matching scores, are documented in [`src/eval.py`](src/eval.py).
+Training logs record interference metrics, distractor induction margins, etc. Crucially, the figures presented in this paper are generated directly from these raw CSV logs rather than via post-hoc analysis. Checkpoint level causal probes, including mechanism knockouts and prefix matching scores, are documented in [`src/eval.py`](src/eval.py).
 
 ## Repository layout
 
 ```
-├── src/          model.py (GPT + mechanisms), train_xla.py (TPU trainer), eval.py (probes)
-│                 make_init.py, data.py, manifest.py, utils.py
-├── configs/      20 paired base/HLA JSONs, FLOPs-matched, v2 recipe, pilot, smoke
-├── scripts/      validation (validate_configs, audit_*), experiment (make_ablation_configs,
-│                 prepare_c4_data), analysis (profile_flops, make_plots, analyze_*)
-├── docs/         THEORY, METRICS, STERILITY, EXPERIMENT_CARD, DATA_CARD
+├── src/          Model.py (GPT + mechanisms), train_xla.py (TPU trainer), eval.py (probes)
+│                 Make_init.py, data.py, manifest.py, utils.py
+├── configs/      20 paired base/HLA JSONs, FLOPs-matched
+├── scripts/      Validation, experiment, analysis
+├── docs/         Theory, metrics, etc.
 └── tests/        256 tests
 ```
 
