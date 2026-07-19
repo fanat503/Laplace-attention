@@ -6,8 +6,4 @@ This project uses GitHub Issues to track bugs and feature requests. Please searc
 issues before filing new issues to avoid duplicates.  For new issues, file your bug or 
 feature request as a new Issue.
 
-For help and questions about using this project, please file a new issue or contact the main author Jayden Teoh via email.
-
-## Microsoft Support Policy  
-
-Support for this project is limited to the resources listed above.
+For help and questions about using this project, please file a new issue or contact the main author Ilya Slyatski via email.
