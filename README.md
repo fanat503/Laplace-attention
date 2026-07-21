@@ -34,7 +34,7 @@ Phase carries *where to look*; magnitude carries *what is said* — like a holog
 | `B_ij` | additive biases: salience  + content-conditioned distance decay + FoX-style gate (baseline) | `0` |
 | `τ_i` | per-query softmax temperature | `1` |
 
-Full derivation, envelopes, and proofs: [`docs/THEORY.md`](docs/THEORY.md).
+Full derivation: [`docs/THEORY.md`](docs/THEORY.md).
 
 ## Getting started
 
@@ -47,7 +47,7 @@ python -m pytest tests/ -q             # 263 passed
 python scripts/audit_sterility.py      # STERILITY AUDIT PASSED
 ```
 
-Train a sterile base/HLA pair (TPU/XLA; every step below also runs on CPU for smoke-testing):
+Train a sterile base/HLA pair (TPU/XLA; every step below also runs on CPU for smoke test):
 
 ```bash
 # 1 · Validate configs and then make init
