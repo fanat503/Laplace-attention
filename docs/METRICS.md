@@ -208,6 +208,24 @@ from the second `[A]` back to the token AFTER the first `[A]`, per head.
 the *mechanism* (attention pattern). Reported per-layer max/mean over heads +
 global max — the standard way to chart emergence of induction circuitry.
 
+### `gate_redundancy_statistics(model)`
+
+Pairwise Pearson correlation between the four per-token content gates
+(K, V, salience, distance), flattened over batch x tokens x heads, averaged
+over layers: `gate_corr_kv`, `gate_corr_ksal`, ... plus the scalar
+`gate_redundancy_mean_abs` (mean |off-diagonal|).
+
+- ~0 - gates specialize (four mechanisms earn their parameters);
+- |corr| -> 1 - redundant parameterization; the pre-registered rule R-B
+  (EXPERIMENT_CARD) merges any pair with |corr| > 0.9 across seeds in v6.
+- NaN at identity init (zero gates have no correlation structure) -
+  deliberately NaN, like the SVD metrics.
+
+This is the measurement-first answer to "why not an orthogonality loss?":
+an aux loss would change the objective (breaking the same-loss sterility
+invariant) and presume the answer. Ground-truth tested: cloned gates give
+corr = 1.0, independent random gates stay below 0.9.
+
 ### `attention_head_similarity(model)`
 
 Mean pairwise Jensen–Shannon divergence between per-head attention
