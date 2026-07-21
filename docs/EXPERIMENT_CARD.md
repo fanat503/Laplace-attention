@@ -19,6 +19,11 @@ Secondary (mechanistic) hypotheses:
 H2: qk_interference decreases vs base while ov_interference is preserved
     (qk_ov_separation increases).
 H3: distractor_margin improves faster than base during training.
+H4: the positional recall curve (positional_recall_curve probe) is FLATTER
+    for HLA than for base at matched tokens (litm_middle_drop lower,
+    litm_worst_frac closer to 1) - the Lost-in-the-Middle reading of the
+    distance/salience mechanisms. Pre-registered BEFORE any run has ever
+    produced this curve.
 
 ## Active mechanism sets per config (B6: capacity vs default)
 
