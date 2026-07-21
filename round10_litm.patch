@@ -1,0 +1,387 @@
+diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
+index 60a85cd..ce68e74 100644
+--- a/CONTRIBUTING.md
++++ b/CONTRIBUTING.md
+@@ -2,7 +2,7 @@
+ 
+ ## Ground rules (they exist for scientific validity, not bureaucracy)
+ 
+-1. **No commit without green tests.** `python -m pytest tests/ -q -W error::UserWarning` must print `263 passed` (or more) before any push. CI enforces this, but run locally first.
++1. **No commit without green tests.** `python -m pytest tests/ -q -W error::UserWarning` must print `267 passed` (or more) before any push. CI enforces this, but run locally first.
+ 2. **Sterility is inviolable.** Any change touching `src/model.py`, `src/make_init.py`, config pairs, or the sampler must keep the identity/parameter-matching/data-order invariants (see `docs/STERILITY.md`). The relevant tests (`test_theory.py::TestTheorem1Identity`, `TestSterility`, `test_make_init.py`) are the gate.
+ 3. **New mechanisms follow the pattern**: identity-initialized (zero params ⇒ exact no-op, add to `reset_hla_identity` + `hla_identity_error` + `HLA_KEY_PATTERNS` + `HLA_NODECAY_MARKERS`), always-created for parameter matching, alpha-gated, clamped, with saturation diagnostics, an SDPA guard if it biases scores, and tests for identity/causality/gradient-flow/clip.
+ 4. **Configs change via the validators.** `validate_configs.py` (pair discipline) and `audit_config_values.py` (numeric sanity) must pass; new allowed diffs require justification in the PR description.
+diff --git a/README.md b/README.md
+index 6a2c922..cd75b33 100644
+--- a/README.md
++++ b/README.md
+@@ -43,7 +43,7 @@ git clone https://github.com/fanat503/Laplace-attention.git
+ cd Laplace-attention
+ pip install -r requirements.txt        # yoou can use CPU
+ 
+-python -m pytest tests/ -q             # 263 passed
++python -m pytest tests/ -q             # 267 passed
+ python scripts/audit_sterility.py      # STERILITY AUDIT PASSED
+ ```
+ 
+@@ -73,7 +73,7 @@ Recommended ladder before any long run: smoke (10 steps), then pilot (1000 steps
+ 
+ ## Why trust the comparison
+ 
+-The methodology is designed so that cheating is hard — 263 tests ([protocol & threat model](docs/STERILITY.md)):
++The methodology is designed so that cheating is hard — 267 tests ([protocol & threat model](docs/STERILITY.md)):
+ 
+ - Same start — shared backbone weights;
+ - Same size — every mechanism module exists in the base too (α = 0, frozen, counted);
+@@ -91,7 +91,7 @@ Training logs record interference metrics, distractor induction margins, etc. Cr
+ ├── configs/      20 paired base/HLA JSONs, FLOPs-matched
+ ├── scripts/      Validation, experiment, analysis
+ ├── docs/         Theory, metrics, etc.
+-└── tests/        263 tests
++└── tests/        267 tests
+ ```
+ 
+ CI runs the full suite plus three audits on every push.
+diff --git a/configs/kaggle_abl_base_template.json b/configs/kaggle_abl_base_template.json
+new file mode 100644
+index 0000000..f60218d
+--- /dev/null
++++ b/configs/kaggle_abl_base_template.json
+@@ -0,0 +1,75 @@
++{
++  "_doc": "Kaggle ablation template (v2 recipe @ 7000 steps ~ 1.8B tokens, ~3.5-4h on v5e-8): fits 2 runs per 9h session with margin. Division of labor: ablation matrix + seeds on Kaggle (this), main 700m runs on the month TPU v3-8 (tpu3_* configs). Feed to make_ablation_configs --base/--hla.",
++  "seed": 42,
++  "save_dir": "/kaggle/working/runs/kaggle_abl_base_template",
++  "run_name": "kaggle_abl_base_template",
++  "train_path": "/kaggle/input/hla-c4-tokens/train_fixed_tokens.bin",
++  "val_path": "/kaggle/input/hla-c4-tokens/val_fixed_tokens.bin",
++  "init_ckpt": "/kaggle/working/inits/init_kaggle_abl_base_template.pt",
++  "init_strict": true,
++  "check_init_hla_identity": true,
++  "expected_vocab_size": 50257,
++  "batch_size_per_device": 16,
++  "eval_batch_size_per_device": 16,
++  "grad_accum": 1,
++  "num_workers": 0,
++  "dataloader_prefetch_factor": 4,
++  "max_steps": 7000,
++  "warmup": 350,
++  "grad_clip": 1.0,
++  "lr": 0.0006,
++  "min_lr": 6e-05,
++  "weight_decay": 0.1,
++  "betas": [
++    0.9,
++    0.95
++  ],
++  "adam_eps": 1e-08,
++  "log_every": 100,
++  "val_every": 500,
++  "svd_every": 2000,
++  "val_batches": 50,
++  "resume_every": 500,
++  "save_every": 0,
++  "keep_last_checkpoints": 2,
++  "min_free_gb": 5.0,
++  "num_cores": 8,
++  "xla_loader_prefetch_size": 8,
++  "xla_device_prefetch_size": 4,
++  "validate_dataset_full": false,
++  "fail_on_nonfinite_val": true,
++  "allow_multiple_epochs": false,
++  "model": {
++    "block_size": 2048,
++    "vocab_size": 50257,
++    "n_layer": 12,
++    "n_head": 16,
++    "n_embd": 1024,
++    "dropout": 0.0,
++    "bias": false,
++    "gradient_checkpointing": true,
++    "fused_swiglu": true,
++    "use_rope": true,
++    "phase_mult": 0.0,
++    "use_laplace": true,
++    "laplace_alpha": 0.0,
++    "laplace_range_k": 0.8,
++    "laplace_range_v": 0.5,
++    "beta_k": 0.7,
++    "beta_v": 0.5,
++    "k_log_clip": 2.0,
++    "v_log_clip": 1.5,
++    "layer_dependent_gate": false,
++    "use_distance_laplace": true,
++    "distance_laplace_alpha": 0.0,
++    "distance_laplace_range": 1.0,
++    "distance_laplace_clip": 1.0,
++    "use_wpe": false,
++    "use_salience_bias": true,
++    "salience_alpha": 0.0,
++    "salience_range": 2.0,
++    "salience_clip": 3.0,
++    "baseline_type": "base_pm_ablated_v2"
++  },
++  "variant": "base_pm_ablated_v2"
++}
+diff --git a/configs/kaggle_abl_hla_template.json b/configs/kaggle_abl_hla_template.json
+new file mode 100644
+index 0000000..8f26888
+--- /dev/null
++++ b/configs/kaggle_abl_hla_template.json
+@@ -0,0 +1,75 @@
++{
++  "_doc": "Kaggle ablation template (v2 recipe @ 7000 steps ~ 1.8B tokens, ~3.5-4h on v5e-8): fits 2 runs per 9h session with margin. Division of labor: ablation matrix + seeds on Kaggle (this), main 700m runs on the month TPU v3-8 (tpu3_* configs). Feed to make_ablation_configs --base/--hla.",
++  "seed": 42,
++  "save_dir": "/kaggle/working/runs/kaggle_abl_hla_template",
++  "run_name": "kaggle_abl_hla_template",
++  "train_path": "/kaggle/input/hla-c4-tokens/train_fixed_tokens.bin",
++  "val_path": "/kaggle/input/hla-c4-tokens/val_fixed_tokens.bin",
++  "init_ckpt": "/kaggle/working/inits/init_kaggle_abl_hla_template.pt",
++  "init_strict": true,
++  "check_init_hla_identity": true,
++  "expected_vocab_size": 50257,
++  "batch_size_per_device": 16,
++  "eval_batch_size_per_device": 16,
++  "grad_accum": 1,
++  "num_workers": 0,
++  "dataloader_prefetch_factor": 4,
++  "max_steps": 7000,
++  "warmup": 350,
++  "grad_clip": 1.0,
++  "lr": 0.0006,
++  "min_lr": 6e-05,
++  "weight_decay": 0.1,
++  "betas": [
++    0.9,
++    0.95
++  ],
++  "adam_eps": 1e-08,
++  "log_every": 100,
++  "val_every": 500,
++  "svd_every": 2000,
++  "val_batches": 50,
++  "resume_every": 500,
++  "save_every": 0,
++  "keep_last_checkpoints": 2,
++  "min_free_gb": 5.0,
++  "num_cores": 8,
++  "xla_loader_prefetch_size": 8,
++  "xla_device_prefetch_size": 4,
++  "validate_dataset_full": false,
++  "fail_on_nonfinite_val": true,
++  "allow_multiple_epochs": false,
++  "model": {
++    "block_size": 2048,
++    "vocab_size": 50257,
++    "n_layer": 12,
++    "n_head": 16,
++    "n_embd": 1024,
++    "dropout": 0.0,
++    "bias": false,
++    "gradient_checkpointing": true,
++    "fused_swiglu": true,
++    "use_rope": true,
++    "phase_mult": 0.15,
++    "use_laplace": true,
++    "laplace_alpha": 1.0,
++    "laplace_range_k": 0.8,
++    "laplace_range_v": 0.5,
++    "beta_k": 0.7,
++    "beta_v": 0.5,
++    "k_log_clip": 2.0,
++    "v_log_clip": 1.5,
++    "layer_dependent_gate": false,
++    "use_distance_laplace": true,
++    "distance_laplace_alpha": 0.5,
++    "distance_laplace_range": 1.0,
++    "distance_laplace_clip": 1.0,
++    "use_wpe": false,
++    "use_salience_bias": true,
++    "salience_alpha": 1.0,
++    "salience_range": 2.0,
++    "salience_clip": 3.0,
++    "baseline_type": "hla_v2_aggressive_gates_salience"
++  },
++  "variant": "hla_v2_aggressive_gates_salience"
++}
+diff --git a/docs/EXPERIMENT_CARD.md b/docs/EXPERIMENT_CARD.md
+index 97c2754..43b0a31 100644
+--- a/docs/EXPERIMENT_CARD.md
++++ b/docs/EXPERIMENT_CARD.md
+@@ -19,6 +19,11 @@ Secondary (mechanistic) hypotheses:
+ H2: qk_interference decreases vs base while ov_interference is preserved
+     (qk_ov_separation increases).
+ H3: distractor_margin improves faster than base during training.
++H4: the positional recall curve (positional_recall_curve probe) is FLATTER
++    for HLA than for base at matched tokens (litm_middle_drop lower,
++    litm_worst_frac closer to 1) - the Lost-in-the-Middle reading of the
++    distance/salience mechanisms. Pre-registered BEFORE any run has ever
++    produced this curve.
+ 
+ ## Active mechanism sets per config (B6: capacity vs default)
+ 
+diff --git a/docs/METRICS.md b/docs/METRICS.md
+index c809968..f22e16b 100644
+--- a/docs/METRICS.md
++++ b/docs/METRICS.md
+@@ -226,6 +226,17 @@ an aux loss would change the objective (breaking the same-loss sterility
+ invariant) and presume the answer. Ground-truth tested: cloned gates give
+ corr = 1.0, independent random gates stay below 0.9.
+ 
++### `positional_recall_curve(model)`
++
++Direct Lost-in-the-Middle probe (Liu et al., 2023): a needle pair [A][B] is
++planted at depth fraction 10/30/50/70/90% of the context; the query [A] sits
++at the end; report P(B) per depth. Scalars: `litm_middle_drop`
++(mean-edge − worst-middle; 0 = flat, positive = the classic U-sag) and
++`litm_worst_frac` (worst-middle / best-edge; 1.0 = no sag). The pre-registered
++long-context reading: HLA's distance/salience mechanisms should FLATTEN this
++curve relative to the sterile base twin. NaN for vocabularies too small for
++the needle token block (deliberate, like the SVD metrics).
++
+ ### `attention_head_similarity(model)`
+ 
+ Mean pairwise Jensen–Shannon divergence between per-head attention
+diff --git a/scripts/analyze_checkpoint.py b/scripts/analyze_checkpoint.py
+index 83a58f2..ea871bd 100644
+--- a/scripts/analyze_checkpoint.py
++++ b/scripts/analyze_checkpoint.py
+@@ -359,6 +359,11 @@ def main() -> None:
+         result["gate_redundancy"] = gate_redundancy_statistics(model, device=device)
+     except Exception as e:
+         result["gate_redundancy"] = {"error": str(e)}
++    try:
++        from src.eval import positional_recall_curve
++        result["positional_recall"] = positional_recall_curve(model, device=device)
++    except Exception as e:
++        result["positional_recall"] = {"error": str(e)}
+ 
+     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+     with open(args.out, "w", encoding="utf-8") as f:
+diff --git a/src/eval.py b/src/eval.py
+index 9bff5cc..1f403a6 100644
+--- a/src/eval.py
++++ b/src/eval.py
+@@ -737,6 +737,61 @@ def mechanism_knockout(model, batch, targets, mechanisms=("phase", "gates", "sal
+         model.train(was_training)
+ 
+ 
++@torch.no_grad()
++def positional_recall_curve(model, device="cpu", seed: int = 42, batch_size: int = 8,
++                            positions=(0.1, 0.3, 0.5, 0.7, 0.9)) -> Dict[str, float]:
++    """Direct Lost-in-the-Middle measurement (Liu et al. 2023, adapted to our
++    induction framework): plant a needle pair [A][B] at a controlled DEPTH
++    FRACTION of the context, query with the second [A] at the very end, and
++    read P(B). Sweeping the depth yields the positional recall curve whose
++    U-shape (edges > middle) is the LITM signature.
++
++    Reports P(B) per depth (pos_10 ... pos_90) plus two scalars:
++      - litm_middle_drop = mean(edge positions) - min(middle positions)
++        (0 for a flat curve; positive = classic LITM sag);
++      - litm_worst_frac  = worst-middle / best-edge ratio (1.0 = no sag).
++    The paper claim this feeds: HLA's content-conditioned distance/salience
++    mechanisms should FLATTEN the curve vs the sterile base twin - measured,
++    not asserted. NaN for tiny vocabs (needs the induction token block).
++    """
++    was_training = model.training
++    model.eval()
++    try:
++        T = min(512, model.config.block_size)
++        if T < 32 or model.config.vocab_size < 46000 + batch_size:
++            return {"litm_middle_drop": float("nan"), "litm_worst_frac": float("nan")}
++        g = torch.Generator(device="cpu")
++        g.manual_seed(seed)
++        out: Dict[str, float] = {}
++        vals = []
++        for frac in positions:
++            tokens = torch.randint(100, min(20000, model.config.vocab_size - 1),
++                                   (batch_size, T), generator=g).to(device)
++            pos_a1 = max(1, min(int(frac * (T - 4)), T - 4))
++            targets = []
++            for i in range(batch_size):
++                a, b = 45000 + i, 46000 + i
++                tokens[i, pos_a1] = a
++                tokens[i, pos_a1 + 1] = b
++                tokens[i, T - 2] = a           # query near the end
++                targets.append(b)
++            logits, _ = model(tokens)
++            probs = torch.softmax(logits[:, T - 2, :].float(), dim=-1)
++            t = torch.tensor(targets, device=device)
++            pb = float(probs.gather(1, t[:, None]).mean().detach().cpu())
++            out[f"pos_{int(frac * 100):02d}"] = pb
++            vals.append((frac, pb))
++        edges = [v for f, v in vals if f <= 0.15 or f >= 0.85]
++        middle = [v for f, v in vals if 0.25 <= f <= 0.75]
++        if edges and middle:
++            out["litm_middle_drop"] = float(sum(edges) / len(edges) - min(middle))
++            best_edge = max(edges)
++            out["litm_worst_frac"] = float(min(middle) / best_edge) if best_edge > 0 else float("nan")
++        return out
++    finally:
++        model.train(was_training)
++
++
+ @torch.no_grad()
+ def gate_redundancy_statistics(model, device="cpu", seed: int = 42, batch_size: int = 2) -> Dict[str, float]:
+     """H3/M6 (round 7): do the four content gates (K, V, salience, distance)
+@@ -869,5 +924,6 @@ __all__ = [
+     "attention_head_similarity",
+     "mechanism_knockout",
+     "gate_redundancy_statistics",
++    "positional_recall_curve",
+     "prefix_matching_score",
+ ]
+diff --git a/tests/test_eval.py b/tests/test_eval.py
+index 455f068..e256f2d 100644
+--- a/tests/test_eval.py
++++ b/tests/test_eval.py
+@@ -39,6 +39,7 @@ from src.eval import (  # noqa: E402
+     attention_head_similarity,
+     mechanism_knockout,
+     gate_redundancy_statistics,
++    positional_recall_curve,
+     prefix_matching_score,
+ )
+ from src.model import GPT, GPTConfig  # noqa: E402
+@@ -643,3 +644,41 @@ class TestGateRedundancy:
+         assert r1 == r2
+         assert m.training
+         assert m.transformer.h[0].attn.capture_diagnostics is False
++
++
++class TestPositionalRecall:
++    """Round 10: direct LITM probe - the pre-registered H4 measurement."""
++
++    def test_keys_and_ranges(self):
++        c = GPTConfig(block_size=128, vocab_size=50257, n_layer=1, n_head=2,
++                      n_embd=32, gradient_checkpointing=False)
++        out = positional_recall_curve(GPT(c), batch_size=2)
++        for k in ("pos_10", "pos_30", "pos_50", "pos_70", "pos_90",
++                  "litm_middle_drop", "litm_worst_frac"):
++            assert k in out
++        for k in ("pos_10", "pos_30", "pos_50", "pos_70", "pos_90"):
++            assert 0.0 <= out[k] <= 1.0
++
++    def test_small_vocab_nan(self):
++        import math
++        c = GPTConfig(block_size=64, vocab_size=256, n_layer=1, n_head=2,
++                      n_embd=32, gradient_checkpointing=False)
++        out = positional_recall_curve(GPT(c))
++        assert math.isnan(out["litm_middle_drop"])
++
++    def test_deterministic_and_state_restored(self):
++        c = GPTConfig(block_size=128, vocab_size=50257, n_layer=1, n_head=2,
++                      n_embd=32, gradient_checkpointing=False)
++        m = GPT(c).train()
++        r1 = positional_recall_curve(m, seed=3, batch_size=2)
++        r2 = positional_recall_curve(m, seed=3, batch_size=2)
++        assert r1 == r2
++        assert m.training
++
++    def test_flat_at_random_init(self):
++        """An untrained model has no positional preference - the curve must be
++        ~flat (drop ~ 0). Ground-truth witness for the metric's zero point."""
++        c = GPTConfig(block_size=128, vocab_size=50257, n_layer=1, n_head=2,
++                      n_embd=32, gradient_checkpointing=False)
++        out = positional_recall_curve(GPT(c), batch_size=2)
++        assert abs(out["litm_middle_drop"]) < 1e-4
