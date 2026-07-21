@@ -70,3 +70,5 @@ jobs:
           python scripts/check_dataloader.py --config configs/smoke_hla_s42.json --batches 2
           python scripts/analyze_checkpoint.py --checkpoint /tmp/init_smoke.pt --out /tmp/ana.json --device cpu
           python scripts/ci_check_analysis.py /tmp/ana.json
+          python scripts/sample.py --checkpoint /tmp/init_smoke.pt --config configs/smoke_hla_s42.json --start-ids 1,2,3 --max-new-tokens 5 --greedy
+          python scripts/bench.py --base configs/smoke_hla_s42.json --hla configs/smoke_hla_s42.json --steps 2 --batch 1 --seq-len 32 --n-layer 1

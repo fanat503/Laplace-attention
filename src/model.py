@@ -279,6 +279,8 @@ class CausalSelfAttention(nn.Module):
         self.last_distance_bias_abs_mean: Optional[torch.Tensor] = None
         self.last_salience_bias_abs_mean: Optional[torch.Tensor] = None
         self.last_salience_sat_frac: Optional[torch.Tensor] = None
+        self.last_gate_sal: Optional[torch.Tensor] = None
+        self.last_gate_d: Optional[torch.Tensor] = None
         self.last_forget_bias_abs_mean: Optional[torch.Tensor] = None
         self.last_forget_sat_frac: Optional[torch.Tensor] = None
         self.last_qtemp_mean: Optional[torch.Tensor] = None
@@ -593,11 +595,14 @@ class CausalSelfAttention(nn.Module):
             with torch.no_grad():
                 self.last_distance_bias_mean = dist_bias.detach().float().mean()
                 self.last_distance_bias_abs_mean = dist_bias.detach().float().abs().mean()
+                if self.capture_diagnostics:
+                    self.last_gate_d = gate_d.detach()
         elif self.capture_diagnostics:
             with torch.no_grad():
                 zero = torch.zeros((), device=x.device)
                 self.last_distance_bias_mean = zero
                 self.last_distance_bias_abs_mean = zero
+                self.last_gate_d = None
 
         if self.use_salience_bias and self.salience_alpha != 0.0:
             # Additive per-key salience: strong suppression/boost independent of
@@ -611,11 +616,17 @@ class CausalSelfAttention(nn.Module):
             with torch.no_grad():
                 self.last_salience_bias_abs_mean = sal_bias.detach().float().abs().mean()
                 self.last_salience_sat_frac = (gate_sal.detach().abs() > 0.99).float().mean()
+                if self.capture_diagnostics:
+                    # Full per-token tensor for the gate-redundancy probe
+                    # (round 7): do the four content gates learn the same
+                    # function or four different ones?
+                    self.last_gate_sal = gate_sal.detach()
         elif self.capture_diagnostics:
             with torch.no_grad():
                 zero = torch.zeros((), device=x.device)
                 self.last_salience_bias_abs_mean = zero
                 self.last_salience_sat_frac = zero
+                self.last_gate_sal = None
 
         if self.use_forget_gate and self.forget_alpha != 0.0:
             # FoX-style cumulative gate (identity at init: W_gate_f = 0).

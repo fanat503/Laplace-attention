@@ -717,3 +717,58 @@ class TestRound6Science:
                     break
             return torch.cat(out)
         assert torch.equal(first(0), first(2))
+
+
+class TestRound8Tooling:
+    """Round 8: nanoGPT-parity entrypoints (sample.py, bench.py) and their
+    contracts - qualitative sampling and honest wall-clock overhead."""
+
+    def test_sample_script_e2e_greedy(self, tmp_path):
+        """sample.py must produce tokens from an init checkpoint on CPU,
+        without a tokenizer (--start-ids path)."""
+        import subprocess
+        ckpt = tmp_path / "init.pt"
+        r0 = subprocess.run(
+            [sys.executable, os.path.join(ROOT, "src", "make_init.py"),
+             "--config", os.path.join(ROOT, "configs", "smoke_hla_s42.json"),
+             "--out", str(ckpt)], capture_output=True, text=True, cwd=ROOT)
+        assert r0.returncode == 0, r0.stderr[-300:]
+        r = subprocess.run(
+            [sys.executable, os.path.join(ROOT, "scripts", "sample.py"),
+             "--checkpoint", str(ckpt),
+             "--config", os.path.join(ROOT, "configs", "smoke_hla_s42.json"),
+             "--start-ids", "1,2,3", "--max-new-tokens", "5", "--greedy"],
+            capture_output=True, text=True, cwd=ROOT)
+        assert r.returncode == 0, r.stderr[-300:]
+        assert "sample 1" in r.stdout
+
+    def test_sample_deterministic_greedy(self, tmp_path):
+        import subprocess
+        ckpt = tmp_path / "init.pt"
+        subprocess.run([sys.executable, os.path.join(ROOT, "src", "make_init.py"),
+                        "--config", os.path.join(ROOT, "configs", "smoke_hla_s42.json"),
+                        "--out", str(ckpt)], capture_output=True, cwd=ROOT)
+        cmd = [sys.executable, os.path.join(ROOT, "scripts", "sample.py"),
+               "--checkpoint", str(ckpt),
+               "--config", os.path.join(ROOT, "configs", "smoke_hla_s42.json"),
+               "--start-ids", "5,6", "--max-new-tokens", "8", "--greedy"]
+        a = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT).stdout
+        b = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT).stdout
+        assert a == b, "greedy sampling must be deterministic"
+
+    def test_bench_script_reports_ratio(self, tmp_path):
+        """bench.py must report the wall-clock HLA/base ratio - the honest
+        companion number to the analytic FLOPs overhead."""
+        import subprocess, json as _json
+        out = tmp_path / "bench.json"
+        r = subprocess.run(
+            [sys.executable, os.path.join(ROOT, "scripts", "bench.py"),
+             "--base", os.path.join(ROOT, "configs", "smoke_hla_s42.json"),
+             "--hla", os.path.join(ROOT, "configs", "smoke_hla_s42.json"),
+             "--steps", "2", "--batch", "1", "--seq-len", "32", "--n-layer", "1",
+             "--out", str(out)],
+            capture_output=True, text=True, cwd=ROOT)
+        assert r.returncode == 0, r.stderr[-300:]
+        d = _json.loads(out.read_text())
+        assert "hla_over_base_ratio" in d and d["hla_over_base_ratio"] > 0
+        assert d["base"]["params"] == d["hla"]["params"]

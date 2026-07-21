@@ -35,6 +35,24 @@ headline number used everything at once.
 | `forget` arm | forget only (FoX baseline) | all HLA mechanisms |
 | `qtemp` arm | qtemp only | all others |
 
+## Pre-registered decision rules for architecture simplification
+
+The mechanism set is the UNION of hypotheses, not the claim that every part
+is necessary. Two rules, committed before any headline run, convert the
+ablation matrix into pruning decisions (protection against both kitchen-sink
+criticism and post-hoc cherry-picking):
+
+- **R-A (arm pruning)**: any mechanism whose single-factor arm shows no gain
+  AND whose leave-one-out arm shows no loss (both within 2x seed std at 200M)
+  is dropped from the recommended recipe; the paper reports the minimal set.
+- **R-B (gate merging)**: `gate_redundancy_statistics` (pairwise Pearson
+  between the K/V/salience/distance gates, logged by checkpoint analysis) is
+  the pre-registered merge criterion: any gate pair with |corr| > 0.9 across
+  seeds at 200M is merged into a shared projection in v6. We measure
+  redundancy instead of penalizing it - an auxiliary orthogonality loss
+  would change the training objective and break the sterile base-vs-HLA
+  comparison (same-objective invariant I5).
+
 ## Pre-registered decisions (locked before headline runs)
 | Decision | Value | Rationale |
 |---|---|---|

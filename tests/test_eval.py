@@ -38,6 +38,7 @@ from src.eval import (  # noqa: E402
     mechanism_gradient_statistics,
     attention_head_similarity,
     mechanism_knockout,
+    gate_redundancy_statistics,
     prefix_matching_score,
 )
 from src.model import GPT, GPTConfig  # noqa: E402
@@ -585,3 +586,60 @@ class TestRangeFlexConsistency:
         out = perturbation_bounds(m)
         assert out["L00_mix_k_max"] <= out["L00_theo_mix_k_max"] + 1e-4
         assert out["L00_util_k_up"] > 0.99
+
+
+class TestGateRedundancy:
+    """Round 7: measurement-first answer to the 'four gates may collapse into
+    one function' attack (H3/M6) - probe, pre-registered merge rule, no aux loss."""
+
+    KW = dict(block_size=64, vocab_size=256, n_layer=2, n_head=2, n_embd=32,
+              gradient_checkpointing=False, use_rope=True, use_wpe=False,
+              use_laplace=True, laplace_alpha=1.0,
+              use_salience_bias=True, salience_alpha=1.0,
+              use_distance_laplace=True, distance_laplace_alpha=0.5)
+
+    def _model(self):
+        return GPT(GPTConfig(**self.KW))
+
+    def test_identity_reports_nan(self):
+        """All-zero gates have no correlation structure - NaN, not fake 0."""
+        import math
+        out = gate_redundancy_statistics(self._model())
+        assert math.isnan(out["gate_redundancy_mean_abs"])
+
+    def test_cloned_gates_detected(self):
+        """Ground-truth witness: gate_v cloned from gate_k must give corr ~ 1."""
+        m = self._model()
+        with torch.no_grad():
+            for blk in m.transformer.h:
+                blk.attn.W_gate_k.weight.normal_(0, 0.5)
+                blk.attn.W_gate_v.weight.copy_(blk.attn.W_gate_k.weight)
+                blk.attn.W_gate_sal.weight.normal_(0, 0.5)
+                blk.attn.W_gate_d.weight.normal_(0, 0.5)
+        out = gate_redundancy_statistics(m)
+        assert out["gate_corr_kv"] > 0.99
+        assert 0.0 <= out["gate_redundancy_mean_abs"] <= 1.0
+
+    def test_independent_gates_low_corr(self):
+        """Independent random gates must NOT be flagged as redundant."""
+        torch.manual_seed(11)
+        m = self._model()
+        with torch.no_grad():
+            for blk in m.transformer.h:
+                for lin in (blk.attn.W_gate_k, blk.attn.W_gate_v,
+                            blk.attn.W_gate_sal, blk.attn.W_gate_d):
+                    lin.weight.normal_(0, 0.5)
+        out = gate_redundancy_statistics(m)
+        assert out["gate_redundancy_mean_abs"] < 0.9
+
+    def test_state_restored_and_deterministic(self):
+        m = self._model().train()
+        with torch.no_grad():  # nonzero gates: NaN != NaN would defeat the equality check
+            for blk in m.transformer.h:
+                blk.attn.W_gate_k.weight.normal_(0, 0.3)
+                blk.attn.W_gate_v.weight.normal_(0, 0.3)
+        r1 = gate_redundancy_statistics(m, seed=5)
+        r2 = gate_redundancy_statistics(m, seed=5)
+        assert r1 == r2
+        assert m.training
+        assert m.transformer.h[0].attn.capture_diagnostics is False

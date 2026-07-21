@@ -45,7 +45,7 @@ git clone https://github.com/fanat503/Laplace-attention.git
 cd Laplace-attention
 pip install -r requirements.txt        # yoou can use CPU
 
-python -m pytest tests/ -q             # 256 passed
+python -m pytest tests/ -q             # 263 passed
 python scripts/audit_sterility.py      # STERILITY AUDIT PASSED
 ```
 
@@ -75,7 +75,7 @@ Recommended ladder before any long run: smoke (10 steps), then pilot (1000 steps
 
 ## Why trust the comparison
 
-The methodology is designed so that cheating is hard — 256 tests ([protocol & threat model](docs/STERILITY.md)):
+The methodology is designed so that cheating is hard — 263 tests ([protocol & threat model](docs/STERILITY.md)):
 
 - Same start — shared backbone weights;
 - Same size — every mechanism module exists in the base too (α = 0, frozen, counted);
@@ -93,7 +93,7 @@ Training logs record interference metrics, distractor induction margins, etc. Cr
 ├── configs/      20 paired base/HLA JSONs, FLOPs-matched
 ├── scripts/      Validation, experiment, analysis
 ├── docs/         Theory, metrics, etc.
-└── tests/        256 tests
+└── tests/        263 tests
 ```
 
 CI runs the full suite plus three audits on every push.

@@ -738,6 +738,75 @@ def mechanism_knockout(model, batch, targets, mechanisms=("phase", "gates", "sal
 
 
 @torch.no_grad()
+def gate_redundancy_statistics(model, device="cpu", seed: int = 42, batch_size: int = 2) -> Dict[str, float]:
+    """H3/M6 (round 7): do the four content gates (K, V, salience, distance)
+    learn the same function of x, or four different ones?
+
+    MEASUREMENT, deliberately not a regularizer: adding an orthogonality/
+    entropy auxiliary loss would (a) break the sterility invariant "base and
+    HLA optimize the SAME objective", (b) add tunable loss weights - an
+    un-preregistered hyperparameter axis, and (c) presume the answer. If
+    trained gates correlate near +-1, the honest conclusion is to MERGE
+    mechanisms in v6, not to force them apart with a penalty.
+
+    Reports, per layer (averaged over heads), pairwise Pearson correlation of
+    per-token gate activations across all token positions, plus the mean
+    absolute off-diagonal correlation as a single redundancy scalar:
+      gate_corr_kv, gate_corr_ksal, gate_corr_kd, gate_corr_vsal,
+      gate_corr_vd, gate_corr_sald, gate_redundancy_mean_abs.
+    ~0 => gates specialize; |corr| -> 1 => redundant parameterization.
+    At identity init every gate is exactly 0 => correlations are undefined;
+    reported as NaN (deliberately, like the SVD metrics)."""
+    was_training = model.training
+    prev_diag = bool(model.transformer.h[0].attn.capture_diagnostics)
+    prev_attn = bool(model.transformer.h[0].attn.capture_attention)
+    model.eval()
+    model.set_diagnostics(enabled=True)
+    try:
+        T = min(256, model.config.block_size)
+        g = torch.Generator(device="cpu")
+        g.manual_seed(seed)
+        tokens = torch.randint(0, model.config.vocab_size, (batch_size, T), generator=g).to(device)
+        model(tokens)
+
+        pair_sums: Dict[str, list] = {}
+        for block in model.transformer.h:
+            attn = block.attn
+            gates = {
+                "k": getattr(attn, "last_gate_k", None),
+                "v": getattr(attn, "last_gate_v", None),
+                "sal": getattr(attn, "last_gate_sal", None),
+                "d": getattr(attn, "last_gate_d", None),
+            }
+            flat = {}
+            for name, t in gates.items():
+                if t is None:
+                    continue
+                v = t.detach().float().reshape(-1)
+                if float(v.std()) > 1e-8:  # constant/zero gate -> corr undefined
+                    flat[name] = v
+            names = sorted(flat)
+            for i in range(len(names)):
+                for j in range(i + 1, len(names)):
+                    a, b = flat[names[i]], flat[names[j]]
+                    corr = float(torch.corrcoef(torch.stack([a, b]))[0, 1])
+                    pair_sums.setdefault(f"gate_corr_{names[i]}{names[j]}", []).append(corr)
+
+        out: Dict[str, float] = {}
+        all_abs: list = []
+        for key, vals in pair_sums.items():
+            out[key] = float(sum(vals) / len(vals))
+            all_abs.extend(abs(v) for v in vals)
+        out["gate_redundancy_mean_abs"] = (
+            float(sum(all_abs) / len(all_abs)) if all_abs else float("nan")
+        )
+        return out
+    finally:
+        model.set_diagnostics(enabled=prev_diag, capture_attention=prev_attn)
+        model.train(was_training)
+
+
+@torch.no_grad()
 def prefix_matching_score(model, device="cpu", seed: int = 42, batch_size: int = 4) -> Dict[str, float]:
     """Canonical induction-head detector (Olsson et al. 2022): attention from
     the second [A] back to the token AFTER the first [A].
@@ -799,5 +868,6 @@ __all__ = [
     "mechanism_gradient_statistics",
     "attention_head_similarity",
     "mechanism_knockout",
+    "gate_redundancy_statistics",
     "prefix_matching_score",
 ]

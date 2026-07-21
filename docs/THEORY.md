@@ -265,7 +265,73 @@ cannot, and no honest theory can.** Here is precisely where mathematics stops:
    the 300M/700M points trades scientific strength for time, which reviewers
    will notice but which you may decide is worth it.
 
-## 4. Why the FoX-family gate is in the codebase (and why it is not "stealing")
+## 4. Design non-goals (attacks we reject on purpose, with reasons)
+
+Recurring reviewer suggestions we decline - each violates identity-init,
+sterility, or the pre-registered protocol. Recorded here so the rebuttal is
+a citation, not an improvisation.
+
+**Learned floor beta = sigmoid(W_b x).** The floor (1-beta) is a bounded
+GUARANTEE (Theorem 4's envelope), not a modeling choice: making it
+input-dependent destroys the analytic bound exactly where it matters (a
+learned beta -> 1 removes the floor mid-training, silently). Identity init is
+also lost: sigmoid(0) = 0.5 != the shipped beta values, so a zero-initialized
+W_b CHANGES the function at step 0. The unbounded-suppression role already
+has a dedicated, floor-free channel: the additive salience bias. This
+division (bounded multiplicative whisper vs unbounded additive silence) is a
+feature, stated syntactically in the unified formula - not an oversight.
+
+**Learned clip bounds.** Clips are numerical guards proven never to bind in
+shipped configs (audit E3: slack >= 2x). A learnable guard can learn to bind
+- turning a safety mechanism into an uninstrumented modeling knob and
+invalidating the E3 audit and the Theorem-4 envelope. The learnable degrees
+of freedom already exist one level down (W_range_* with range_flex).
+
+**Auxiliary losses (gate entropy, head orthogonality, disentanglement).**
+Any aux term changes the objective, so base-vs-HLA would no longer compare
+architectures under the SAME loss - the core sterility invariant. Each term
+also ships loss-weight hyperparameters that would need per-arm tuning,
+violating the fairness invariant (hparams tuned on base only). We measure
+what these losses would enforce (gate_redundancy_statistics, gate_erank,
+attention_head_similarity, sat_frac) and let the ablation matrix decide;
+pre-registered rules R-A/R-B in EXPERIMENT_CARD convert measurements into
+architecture changes for v6.
+
+**Sigmoid mixing instead of exponential.** sigmoid caps mix at 1.0 -
+amplification becomes impossible, killing half the mechanism (shipped v2
+envelope reaches x2.20 amplification; measured, audit E1). Log-space exp is
+symmetric in suppress/amplify and composes additively with the score-space
+biases. The floor handles the "smooth near identity" concern.
+
+**Full rotation matrices instead of pairwise.** An unconstrained d x d map
+is not an isometry - it can rescale norms, which re-entangles retrieval
+geometry with magnitude and destroys Theorem 3 (and the gauge reading of
+Theorem 6). Constraining to SO(d) requires expm/Cayley (O(d^2) params,
+numerically fragile on TPU bf16). Commuting 2D planes are the standard,
+RoPE-compatible parameterization (Corollary 7.1 depends on it); per-plane
+budgets already relax uniformity.
+
+**Cross-layer gate conditioning (gate_l = f(gate_{l-1}, x_l)).** Introduces
+a second recurrent pathway outside the residual stream: breaks per-layer
+identity-init locality (a layer's mechanism is no longer zero-parameter
+silent if its input gate is nonzero), complicates KV-cache exactness, and
+duplicates what the residual stream already provides - layer l's x ALREADY
+contains layer l-1's outputs. The depth profile (lambda_l, learnable temp)
+is the sanctioned cross-layer axis: monotone, bounded, identity at init.
+
+**Non-zero / per-layer-scaled gate init.** Zero init IS the sterility
+guarantee (bit-exact base at step 0, Theorem 1); any symmetry-breaking init
+trades the central claim for an unproven optimization hunch. Symmetry breaks
+through the input projections (W_gate rows see different x-statistics from
+step 1); mech_grad_* logging verifies gradients are alive (Theorem 5).
+
+**Warmup scheduling of alphas.** Alpha ramps change the effective
+architecture during training, confounding "mechanism helps" with "curriculum
+helps" - a new axis the ablation matrix cannot isolate. The identity init
+already provides a natural learned ramp: mechanisms grow from exact zero at
+whatever rate the data demands (observable in gate_abs_mean / angle_std).
+
+## 5. Why the FoX-family gate is in the codebase (and why it is not "stealing")
 
 The forget gate is implemented as a **baseline arm**, clearly labeled
 FoX-family with citation, OFF by default in every HLA config. Reproducing a
