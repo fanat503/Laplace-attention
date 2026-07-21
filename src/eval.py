@@ -738,6 +738,61 @@ def mechanism_knockout(model, batch, targets, mechanisms=("phase", "gates", "sal
 
 
 @torch.no_grad()
+def positional_recall_curve(model, device="cpu", seed: int = 42, batch_size: int = 8,
+                            positions=(0.1, 0.3, 0.5, 0.7, 0.9)) -> Dict[str, float]:
+    """Direct Lost-in-the-Middle measurement (Liu et al. 2023, adapted to our
+    induction framework): plant a needle pair [A][B] at a controlled DEPTH
+    FRACTION of the context, query with the second [A] at the very end, and
+    read P(B). Sweeping the depth yields the positional recall curve whose
+    U-shape (edges > middle) is the LITM signature.
+
+    Reports P(B) per depth (pos_10 ... pos_90) plus two scalars:
+      - litm_middle_drop = mean(edge positions) - min(middle positions)
+        (0 for a flat curve; positive = classic LITM sag);
+      - litm_worst_frac  = worst-middle / best-edge ratio (1.0 = no sag).
+    The paper claim this feeds: HLA's content-conditioned distance/salience
+    mechanisms should FLATTEN the curve vs the sterile base twin - measured,
+    not asserted. NaN for tiny vocabs (needs the induction token block).
+    """
+    was_training = model.training
+    model.eval()
+    try:
+        T = min(512, model.config.block_size)
+        if T < 32 or model.config.vocab_size < 46000 + batch_size:
+            return {"litm_middle_drop": float("nan"), "litm_worst_frac": float("nan")}
+        g = torch.Generator(device="cpu")
+        g.manual_seed(seed)
+        out: Dict[str, float] = {}
+        vals = []
+        for frac in positions:
+            tokens = torch.randint(100, min(20000, model.config.vocab_size - 1),
+                                   (batch_size, T), generator=g).to(device)
+            pos_a1 = max(1, min(int(frac * (T - 4)), T - 4))
+            targets = []
+            for i in range(batch_size):
+                a, b = 45000 + i, 46000 + i
+                tokens[i, pos_a1] = a
+                tokens[i, pos_a1 + 1] = b
+                tokens[i, T - 2] = a           # query near the end
+                targets.append(b)
+            logits, _ = model(tokens)
+            probs = torch.softmax(logits[:, T - 2, :].float(), dim=-1)
+            t = torch.tensor(targets, device=device)
+            pb = float(probs.gather(1, t[:, None]).mean().detach().cpu())
+            out[f"pos_{int(frac * 100):02d}"] = pb
+            vals.append((frac, pb))
+        edges = [v for f, v in vals if f <= 0.15 or f >= 0.85]
+        middle = [v for f, v in vals if 0.25 <= f <= 0.75]
+        if edges and middle:
+            out["litm_middle_drop"] = float(sum(edges) / len(edges) - min(middle))
+            best_edge = max(edges)
+            out["litm_worst_frac"] = float(min(middle) / best_edge) if best_edge > 0 else float("nan")
+        return out
+    finally:
+        model.train(was_training)
+
+
+@torch.no_grad()
 def gate_redundancy_statistics(model, device="cpu", seed: int = 42, batch_size: int = 2) -> Dict[str, float]:
     """H3/M6 (round 7): do the four content gates (K, V, salience, distance)
     learn the same function of x, or four different ones?
@@ -869,5 +924,6 @@ __all__ = [
     "attention_head_similarity",
     "mechanism_knockout",
     "gate_redundancy_statistics",
+    "positional_recall_curve",
     "prefix_matching_score",
 ]

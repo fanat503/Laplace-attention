@@ -359,6 +359,11 @@ def main() -> None:
         result["gate_redundancy"] = gate_redundancy_statistics(model, device=device)
     except Exception as e:
         result["gate_redundancy"] = {"error": str(e)}
+    try:
+        from src.eval import positional_recall_curve
+        result["positional_recall"] = positional_recall_curve(model, device=device)
+    except Exception as e:
+        result["positional_recall"] = {"error": str(e)}
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as f:
