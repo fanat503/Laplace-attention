@@ -354,6 +354,11 @@ def main() -> None:
         result["prefix_matching"] = prefix_matching_score(model, device=device, batch_size=1)
     except Exception as e:  # vocab too small etc.
         result["prefix_matching"] = {"error": str(e)}
+    try:
+        from src.eval import gate_redundancy_statistics
+        result["gate_redundancy"] = gate_redundancy_statistics(model, device=device)
+    except Exception as e:
+        result["gate_redundancy"] = {"error": str(e)}
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as f:
