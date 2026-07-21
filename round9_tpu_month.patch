@@ -1,0 +1,1802 @@
+diff --git a/.github/workflows/tests.yml b/.github/workflows/tests.yml
+index 320a36a..509f48e 100644
+--- a/.github/workflows/tests.yml
++++ b/.github/workflows/tests.yml
+@@ -70,3 +70,5 @@ jobs:
+           python scripts/check_dataloader.py --config configs/smoke_hla_s42.json --batches 2
+           python scripts/analyze_checkpoint.py --checkpoint /tmp/init_smoke.pt --out /tmp/ana.json --device cpu
+           python scripts/ci_check_analysis.py /tmp/ana.json
++          python scripts/sample.py --checkpoint /tmp/init_smoke.pt --config configs/smoke_hla_s42.json --start-ids 1,2,3 --max-new-tokens 5 --greedy
++          python scripts/bench.py --base configs/smoke_hla_s42.json --hla configs/smoke_hla_s42.json --steps 2 --batch 1 --seq-len 32 --n-layer 1
+diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
+index 41f2a54..60a85cd 100644
+--- a/CONTRIBUTING.md
++++ b/CONTRIBUTING.md
+@@ -2,7 +2,7 @@
+ 
+ ## Ground rules (they exist for scientific validity, not bureaucracy)
+ 
+-1. **No commit without green tests.** `python -m pytest tests/ -q -W error::UserWarning` must print `256 passed` (or more) before any push. CI enforces this, but run locally first.
++1. **No commit without green tests.** `python -m pytest tests/ -q -W error::UserWarning` must print `263 passed` (or more) before any push. CI enforces this, but run locally first.
+ 2. **Sterility is inviolable.** Any change touching `src/model.py`, `src/make_init.py`, config pairs, or the sampler must keep the identity/parameter-matching/data-order invariants (see `docs/STERILITY.md`). The relevant tests (`test_theory.py::TestTheorem1Identity`, `TestSterility`, `test_make_init.py`) are the gate.
+ 3. **New mechanisms follow the pattern**: identity-initialized (zero params ⇒ exact no-op, add to `reset_hla_identity` + `hla_identity_error` + `HLA_KEY_PATTERNS` + `HLA_NODECAY_MARKERS`), always-created for parameter matching, alpha-gated, clamped, with saturation diagnostics, an SDPA guard if it biases scores, and tests for identity/causality/gradient-flow/clip.
+ 4. **Configs change via the validators.** `validate_configs.py` (pair discipline) and `audit_config_values.py` (numeric sanity) must pass; new allowed diffs require justification in the PR description.
+diff --git a/README.md b/README.md
+index 7d857f8..c941eed 100644
+--- a/README.md
++++ b/README.md
+@@ -45,7 +45,7 @@ git clone https://github.com/fanat503/Laplace-attention.git
+ cd Laplace-attention
+ pip install -r requirements.txt        # yoou can use CPU
+ 
+-python -m pytest tests/ -q             # 256 passed
++python -m pytest tests/ -q             # 263 passed
+ python scripts/audit_sterility.py      # STERILITY AUDIT PASSED
+ ```
+ 
+@@ -75,7 +75,7 @@ Recommended ladder before any long run: smoke (10 steps), then pilot (1000 steps
+ 
+ ## Why trust the comparison
+ 
+-The methodology is designed so that cheating is hard — 256 tests ([protocol & threat model](docs/STERILITY.md)):
++The methodology is designed so that cheating is hard — 263 tests ([protocol & threat model](docs/STERILITY.md)):
+ 
+ - Same start — shared backbone weights;
+ - Same size — every mechanism module exists in the base too (α = 0, frozen, counted);
+@@ -93,7 +93,7 @@ Training logs record interference metrics, distractor induction margins, etc. Cr
+ ├── configs/      20 paired base/HLA JSONs, FLOPs-matched
+ ├── scripts/      Validation, experiment, analysis
+ ├── docs/         Theory, metrics, etc.
+-└── tests/        256 tests
++└── tests/        263 tests
+ ```
+ 
+ CI runs the full suite plus three audits on every push.
+diff --git a/configs/tpu3_200m_base_s42.json b/configs/tpu3_200m_base_s42.json
+new file mode 100644
+index 0000000..ed934cc
+--- /dev/null
++++ b/configs/tpu3_200m_base_s42.json
+@@ -0,0 +1,69 @@
++{
++  "_doc": "Base GPT for matched experiments with HLA. 200M params (12L x 1024d x 16H), 5.2B tokens (20000 steps x 128 effective batch x 2048 seq), ~7h on Kaggle TPU v5e-8. HLA components OFF for clean baseline. For HLA version: phase_mult=0.15, use_laplace=true, laplace_alpha=1.0, use_distance_laplace=true, distance_laplace_alpha=0.5. Otherwise IDENTICAL for matched comparison. [FIX: n_head 12->16, 1024 not divisible by 12] [TPU v3-8 month grant: local TPU-VM paths, same recipe]",
++  "seed": 42,
++  "save_dir": "runs/tpu3_200m_base_s42",
++  "run_name": "tpu3_200m_base_s42",
++  "train_path": "data/train_fixed_tokens.bin",
++  "val_path": "data/val_fixed_tokens.bin",
++  "init_ckpt": "inits/init_tpu3_200m_base_s42.pt",
++  "init_strict": true,
++  "check_init_hla_identity": true,
++  "expected_vocab_size": 50257,
++  "batch_size_per_device": 16,
++  "eval_batch_size_per_device": 16,
++  "grad_accum": 1,
++  "num_workers": 0,
++  "dataloader_prefetch_factor": 4,
++  "max_steps": 20000,
++  "warmup": 1000,
++  "grad_clip": 1.0,
++  "lr": 0.0006,
++  "min_lr": 6e-05,
++  "weight_decay": 0.1,
++  "betas": [
++    0.9,
++    0.95
++  ],
++  "adam_eps": 1e-08,
++  "log_every": 100,
++  "val_every": 500,
++  "svd_every": 2000,
++  "val_batches": 50,
++  "resume_every": 500,
++  "save_every": 0,
++  "keep_last_checkpoints": 2,
++  "min_free_gb": 5.0,
++  "num_cores": 8,
++  "xla_loader_prefetch_size": 8,
++  "xla_device_prefetch_size": 4,
++  "validate_dataset_full": false,
++  "fail_on_nonfinite_val": true,
++  "allow_multiple_epochs": false,
++  "model": {
++    "block_size": 2048,
++    "vocab_size": 50257,
++    "n_layer": 12,
++    "n_head": 16,
++    "n_embd": 1024,
++    "dropout": 0.0,
++    "bias": false,
++    "gradient_checkpointing": true,
++    "fused_swiglu": true,
++    "use_rope": true,
++    "phase_mult": 0.0,
++    "use_laplace": true,
++    "laplace_alpha": 0.0,
++    "laplace_range_k": 0.35,
++    "laplace_range_v": 0.2,
++    "beta_k": 0.5,
++    "beta_v": 0.25,
++    "k_log_clip": 1.5,
++    "v_log_clip": 1.0,
++    "layer_dependent_gate": false,
++    "use_distance_laplace": true,
++    "distance_laplace_alpha": 0.0,
++    "distance_laplace_range": 1.0,
++    "distance_laplace_clip": 1.0,
++    "use_wpe": false
++  }
++}
+diff --git a/configs/tpu3_200m_base_v2_s42.json b/configs/tpu3_200m_base_v2_s42.json
+new file mode 100644
+index 0000000..2a577c0
+--- /dev/null
++++ b/configs/tpu3_200m_base_v2_s42.json
+@@ -0,0 +1,75 @@
++{
++  "_doc": "V2 recipe: stronger gate envelope (K mix in [0.56,2.20], V in [0.77,1.43]) + additive per-key salience bias (+-2 nats, weight x0.135..x7.4, no multiplicative floor). Motivation: v1 multiplicative floor (1-beta) capped suppression at x0.73 score scale; salience bias enables true strong suppression/boost of distant tokens. All HLA alphas = 0 (parameter-matched ablated base). [TPU v3-8 month grant: local TPU-VM paths, same recipe]",
++  "seed": 42,
++  "save_dir": "runs/tpu3_200m_base_v2_s42",
++  "run_name": "tpu3_200m_base_v2_s42",
++  "train_path": "data/train_fixed_tokens.bin",
++  "val_path": "data/val_fixed_tokens.bin",
++  "init_ckpt": "inits/init_tpu3_200m_base_v2_s42.pt",
++  "init_strict": true,
++  "check_init_hla_identity": true,
++  "expected_vocab_size": 50257,
++  "batch_size_per_device": 16,
++  "eval_batch_size_per_device": 16,
++  "grad_accum": 1,
++  "num_workers": 0,
++  "dataloader_prefetch_factor": 4,
++  "max_steps": 20000,
++  "warmup": 1000,
++  "grad_clip": 1.0,
++  "lr": 0.0006,
++  "min_lr": 6e-05,
++  "weight_decay": 0.1,
++  "betas": [
++    0.9,
++    0.95
++  ],
++  "adam_eps": 1e-08,
++  "log_every": 100,
++  "val_every": 500,
++  "svd_every": 2000,
++  "val_batches": 50,
++  "resume_every": 500,
++  "save_every": 0,
++  "keep_last_checkpoints": 2,
++  "min_free_gb": 5.0,
++  "num_cores": 8,
++  "xla_loader_prefetch_size": 8,
++  "xla_device_prefetch_size": 4,
++  "validate_dataset_full": false,
++  "fail_on_nonfinite_val": true,
++  "allow_multiple_epochs": false,
++  "model": {
++    "block_size": 2048,
++    "vocab_size": 50257,
++    "n_layer": 12,
++    "n_head": 16,
++    "n_embd": 1024,
++    "dropout": 0.0,
++    "bias": false,
++    "gradient_checkpointing": true,
++    "fused_swiglu": true,
++    "use_rope": true,
++    "phase_mult": 0.0,
++    "use_laplace": true,
++    "laplace_alpha": 0.0,
++    "laplace_range_k": 0.8,
++    "laplace_range_v": 0.5,
++    "beta_k": 0.7,
++    "beta_v": 0.5,
++    "k_log_clip": 2.0,
++    "v_log_clip": 1.5,
++    "layer_dependent_gate": false,
++    "use_distance_laplace": true,
++    "distance_laplace_alpha": 0.0,
++    "distance_laplace_range": 1.0,
++    "distance_laplace_clip": 1.0,
++    "use_wpe": false,
++    "use_salience_bias": true,
++    "salience_alpha": 0.0,
++    "salience_range": 2.0,
++    "salience_clip": 3.0,
++    "baseline_type": "base_pm_ablated_v2"
++  },
++  "variant": "base_pm_ablated_v2"
++}
+diff --git a/configs/tpu3_200m_base_v2_s43.json b/configs/tpu3_200m_base_v2_s43.json
+new file mode 100644
+index 0000000..76ceb13
+--- /dev/null
++++ b/configs/tpu3_200m_base_v2_s43.json
+@@ -0,0 +1,75 @@
++{
++  "_doc": "V2 recipe, seed 43 (paired stats; same-seed pair shares init).",
++  "seed": 43,
++  "save_dir": "runs/tpu3_200m_base_v2_s43",
++  "run_name": "tpu3_200m_base_v2_s43",
++  "train_path": "data/train_fixed_tokens.bin",
++  "val_path": "data/val_fixed_tokens.bin",
++  "init_ckpt": "inits/init_tpu3_200m_base_v2_s43.pt",
++  "init_strict": true,
++  "check_init_hla_identity": true,
++  "expected_vocab_size": 50257,
++  "batch_size_per_device": 16,
++  "eval_batch_size_per_device": 16,
++  "grad_accum": 1,
++  "num_workers": 0,
++  "dataloader_prefetch_factor": 4,
++  "max_steps": 20000,
++  "warmup": 1000,
++  "grad_clip": 1.0,
++  "lr": 0.0006,
++  "min_lr": 6e-05,
++  "weight_decay": 0.1,
++  "betas": [
++    0.9,
++    0.95
++  ],
++  "adam_eps": 1e-08,
++  "log_every": 100,
++  "val_every": 500,
++  "svd_every": 2000,
++  "val_batches": 50,
++  "resume_every": 500,
++  "save_every": 0,
++  "keep_last_checkpoints": 2,
++  "min_free_gb": 5.0,
++  "num_cores": 8,
++  "xla_loader_prefetch_size": 8,
++  "xla_device_prefetch_size": 4,
++  "validate_dataset_full": false,
++  "fail_on_nonfinite_val": true,
++  "allow_multiple_epochs": false,
++  "model": {
++    "block_size": 2048,
++    "vocab_size": 50257,
++    "n_layer": 12,
++    "n_head": 16,
++    "n_embd": 1024,
++    "dropout": 0.0,
++    "bias": false,
++    "gradient_checkpointing": true,
++    "fused_swiglu": true,
++    "use_rope": true,
++    "phase_mult": 0.0,
++    "use_laplace": true,
++    "laplace_alpha": 0.0,
++    "laplace_range_k": 0.8,
++    "laplace_range_v": 0.5,
++    "beta_k": 0.7,
++    "beta_v": 0.5,
++    "k_log_clip": 2.0,
++    "v_log_clip": 1.5,
++    "layer_dependent_gate": false,
++    "use_distance_laplace": true,
++    "distance_laplace_alpha": 0.0,
++    "distance_laplace_range": 1.0,
++    "distance_laplace_clip": 1.0,
++    "use_wpe": false,
++    "use_salience_bias": true,
++    "salience_alpha": 0.0,
++    "salience_range": 2.0,
++    "salience_clip": 3.0,
++    "baseline_type": "base_pm_ablated_v2"
++  },
++  "variant": "base_pm_ablated_v2"
++}
+diff --git a/configs/tpu3_200m_base_v2_s44.json b/configs/tpu3_200m_base_v2_s44.json
+new file mode 100644
+index 0000000..baccc6e
+--- /dev/null
++++ b/configs/tpu3_200m_base_v2_s44.json
+@@ -0,0 +1,75 @@
++{
++  "_doc": "V2 recipe, seed 44 (paired stats; same-seed pair shares init).",
++  "seed": 44,
++  "save_dir": "runs/tpu3_200m_base_v2_s44",
++  "run_name": "tpu3_200m_base_v2_s44",
++  "train_path": "data/train_fixed_tokens.bin",
++  "val_path": "data/val_fixed_tokens.bin",
++  "init_ckpt": "inits/init_tpu3_200m_base_v2_s44.pt",
++  "init_strict": true,
++  "check_init_hla_identity": true,
++  "expected_vocab_size": 50257,
++  "batch_size_per_device": 16,
++  "eval_batch_size_per_device": 16,
++  "grad_accum": 1,
++  "num_workers": 0,
++  "dataloader_prefetch_factor": 4,
++  "max_steps": 20000,
++  "warmup": 1000,
++  "grad_clip": 1.0,
++  "lr": 0.0006,
++  "min_lr": 6e-05,
++  "weight_decay": 0.1,
++  "betas": [
++    0.9,
++    0.95
++  ],
++  "adam_eps": 1e-08,
++  "log_every": 100,
++  "val_every": 500,
++  "svd_every": 2000,
++  "val_batches": 50,
++  "resume_every": 500,
++  "save_every": 0,
++  "keep_last_checkpoints": 2,
++  "min_free_gb": 5.0,
++  "num_cores": 8,
++  "xla_loader_prefetch_size": 8,
++  "xla_device_prefetch_size": 4,
++  "validate_dataset_full": false,
++  "fail_on_nonfinite_val": true,
++  "allow_multiple_epochs": false,
++  "model": {
++    "block_size": 2048,
++    "vocab_size": 50257,
++    "n_layer": 12,
++    "n_head": 16,
++    "n_embd": 1024,
++    "dropout": 0.0,
++    "bias": false,
++    "gradient_checkpointing": true,
++    "fused_swiglu": true,
++    "use_rope": true,
++    "phase_mult": 0.0,
++    "use_laplace": true,
++    "laplace_alpha": 0.0,
++    "laplace_range_k": 0.8,
++    "laplace_range_v": 0.5,
++    "beta_k": 0.7,
++    "beta_v": 0.5,
++    "k_log_clip": 2.0,
++    "v_log_clip": 1.5,
++    "layer_dependent_gate": false,
++    "use_distance_laplace": true,
++    "distance_laplace_alpha": 0.0,
++    "distance_laplace_range": 1.0,
++    "distance_laplace_clip": 1.0,
++    "use_wpe": false,
++    "use_salience_bias": true,
++    "salience_alpha": 0.0,
++    "salience_range": 2.0,
++    "salience_clip": 3.0,
++    "baseline_type": "base_pm_ablated_v2"
++  },
++  "variant": "base_pm_ablated_v2"
++}
+diff --git a/configs/tpu3_200m_hla_s42.json b/configs/tpu3_200m_hla_s42.json
+new file mode 100644
+index 0000000..e2b147a
+--- /dev/null
++++ b/configs/tpu3_200m_hla_s42.json
+@@ -0,0 +1,69 @@
++{
++  "_doc": "HLA GPT for matched experiments. Same backbone as base (200M params, 12L x 1024d x 16H). 5.2B tokens, ~7h on Kaggle TPU v5e-8. HLA components ON. phase_mult=0.15 (user-validated), laplace_alpha=1.0, distance_laplace_alpha=0.5. Sweep phase_mult in {0.05, 0.15, 0.3, 0.5} for paper ablation. [FIX: n_head 12->16, 1024 not divisible by 12] [TPU v3-8 month grant: local TPU-VM paths, same recipe]",
++  "seed": 42,
++  "save_dir": "runs/tpu3_200m_hla_s42",
++  "run_name": "tpu3_200m_hla_s42",
++  "train_path": "data/train_fixed_tokens.bin",
++  "val_path": "data/val_fixed_tokens.bin",
++  "init_ckpt": "inits/init_tpu3_200m_hla_s42.pt",
++  "init_strict": true,
++  "check_init_hla_identity": true,
++  "expected_vocab_size": 50257,
++  "batch_size_per_device": 16,
++  "eval_batch_size_per_device": 16,
++  "grad_accum": 1,
++  "num_workers": 0,
++  "dataloader_prefetch_factor": 4,
++  "max_steps": 20000,
++  "warmup": 1000,
++  "grad_clip": 1.0,
++  "lr": 0.0006,
++  "min_lr": 6e-05,
++  "weight_decay": 0.1,
++  "betas": [
++    0.9,
++    0.95
++  ],
++  "adam_eps": 1e-08,
++  "log_every": 100,
++  "val_every": 500,
++  "svd_every": 2000,
++  "val_batches": 50,
++  "resume_every": 500,
++  "save_every": 0,
++  "keep_last_checkpoints": 2,
++  "min_free_gb": 5.0,
++  "num_cores": 8,
++  "xla_loader_prefetch_size": 8,
++  "xla_device_prefetch_size": 4,
++  "validate_dataset_full": false,
++  "fail_on_nonfinite_val": true,
++  "allow_multiple_epochs": false,
++  "model": {
++    "block_size": 2048,
++    "vocab_size": 50257,
++    "n_layer": 12,
++    "n_head": 16,
++    "n_embd": 1024,
++    "dropout": 0.0,
++    "bias": false,
++    "gradient_checkpointing": true,
++    "fused_swiglu": true,
++    "use_rope": true,
++    "phase_mult": 0.15,
++    "use_laplace": true,
++    "laplace_alpha": 1.0,
++    "laplace_range_k": 0.35,
++    "laplace_range_v": 0.2,
++    "beta_k": 0.5,
++    "beta_v": 0.25,
++    "k_log_clip": 1.5,
++    "v_log_clip": 1.0,
++    "layer_dependent_gate": false,
++    "use_distance_laplace": true,
++    "distance_laplace_alpha": 0.5,
++    "distance_laplace_range": 1.0,
++    "distance_laplace_clip": 1.0,
++    "use_wpe": false
++  }
++}
+diff --git a/configs/tpu3_200m_hla_v2_s42.json b/configs/tpu3_200m_hla_v2_s42.json
+new file mode 100644
+index 0000000..795a842
+--- /dev/null
++++ b/configs/tpu3_200m_hla_v2_s42.json
+@@ -0,0 +1,75 @@
++{
++  "_doc": "V2 recipe: stronger gate envelope (K mix in [0.56,2.20], V in [0.77,1.43]) + additive per-key salience bias (+-2 nats, weight x0.135..x7.4, no multiplicative floor). Motivation: v1 multiplicative floor (1-beta) capped suppression at x0.73 score scale; salience bias enables true strong suppression/boost of distant tokens. HLA ON. [TPU v3-8 month grant: local TPU-VM paths, same recipe]",
++  "seed": 42,
++  "save_dir": "runs/tpu3_200m_hla_v2_s42",
++  "run_name": "tpu3_200m_hla_v2_s42",
++  "train_path": "data/train_fixed_tokens.bin",
++  "val_path": "data/val_fixed_tokens.bin",
++  "init_ckpt": "inits/init_tpu3_200m_hla_v2_s42.pt",
++  "init_strict": true,
++  "check_init_hla_identity": true,
++  "expected_vocab_size": 50257,
++  "batch_size_per_device": 16,
++  "eval_batch_size_per_device": 16,
++  "grad_accum": 1,
++  "num_workers": 0,
++  "dataloader_prefetch_factor": 4,
++  "max_steps": 20000,
++  "warmup": 1000,
++  "grad_clip": 1.0,
++  "lr": 0.0006,
++  "min_lr": 6e-05,
++  "weight_decay": 0.1,
++  "betas": [
++    0.9,
++    0.95
++  ],
++  "adam_eps": 1e-08,
++  "log_every": 100,
++  "val_every": 500,
++  "svd_every": 2000,
++  "val_batches": 50,
++  "resume_every": 500,
++  "save_every": 0,
++  "keep_last_checkpoints": 2,
++  "min_free_gb": 5.0,
++  "num_cores": 8,
++  "xla_loader_prefetch_size": 8,
++  "xla_device_prefetch_size": 4,
++  "validate_dataset_full": false,
++  "fail_on_nonfinite_val": true,
++  "allow_multiple_epochs": false,
++  "model": {
++    "block_size": 2048,
++    "vocab_size": 50257,
++    "n_layer": 12,
++    "n_head": 16,
++    "n_embd": 1024,
++    "dropout": 0.0,
++    "bias": false,
++    "gradient_checkpointing": true,
++    "fused_swiglu": true,
++    "use_rope": true,
++    "phase_mult": 0.15,
++    "use_laplace": true,
++    "laplace_alpha": 1.0,
++    "laplace_range_k": 0.8,
++    "laplace_range_v": 0.5,
++    "beta_k": 0.7,
++    "beta_v": 0.5,
++    "k_log_clip": 2.0,
++    "v_log_clip": 1.5,
++    "layer_dependent_gate": false,
++    "use_distance_laplace": true,
++    "distance_laplace_alpha": 0.5,
++    "distance_laplace_range": 1.0,
++    "distance_laplace_clip": 1.0,
++    "use_wpe": false,
++    "use_salience_bias": true,
++    "salience_alpha": 1.0,
++    "salience_range": 2.0,
++    "salience_clip": 3.0,
++    "baseline_type": "hla_v2_aggressive_gates_salience"
++  },
++  "variant": "hla_v2_aggressive_gates_salience"
++}
+diff --git a/configs/tpu3_200m_hla_v2_s43.json b/configs/tpu3_200m_hla_v2_s43.json
+new file mode 100644
+index 0000000..719babf
+--- /dev/null
++++ b/configs/tpu3_200m_hla_v2_s43.json
+@@ -0,0 +1,75 @@
++{
++  "_doc": "V2 recipe, seed 43 (paired stats; same-seed pair shares init).",
++  "seed": 43,
++  "save_dir": "runs/tpu3_200m_hla_v2_s43",
++  "run_name": "tpu3_200m_hla_v2_s43",
++  "train_path": "data/train_fixed_tokens.bin",
++  "val_path": "data/val_fixed_tokens.bin",
++  "init_ckpt": "inits/init_tpu3_200m_hla_v2_s43.pt",
++  "init_strict": true,
++  "check_init_hla_identity": true,
++  "expected_vocab_size": 50257,
++  "batch_size_per_device": 16,
++  "eval_batch_size_per_device": 16,
++  "grad_accum": 1,
++  "num_workers": 0,
++  "dataloader_prefetch_factor": 4,
++  "max_steps": 20000,
++  "warmup": 1000,
++  "grad_clip": 1.0,
++  "lr": 0.0006,
++  "min_lr": 6e-05,
++  "weight_decay": 0.1,
++  "betas": [
++    0.9,
++    0.95
++  ],
++  "adam_eps": 1e-08,
++  "log_every": 100,
++  "val_every": 500,
++  "svd_every": 2000,
++  "val_batches": 50,
++  "resume_every": 500,
++  "save_every": 0,
++  "keep_last_checkpoints": 2,
++  "min_free_gb": 5.0,
++  "num_cores": 8,
++  "xla_loader_prefetch_size": 8,
++  "xla_device_prefetch_size": 4,
++  "validate_dataset_full": false,
++  "fail_on_nonfinite_val": true,
++  "allow_multiple_epochs": false,
++  "model": {
++    "block_size": 2048,
++    "vocab_size": 50257,
++    "n_layer": 12,
++    "n_head": 16,
++    "n_embd": 1024,
++    "dropout": 0.0,
++    "bias": false,
++    "gradient_checkpointing": true,
++    "fused_swiglu": true,
++    "use_rope": true,
++    "phase_mult": 0.15,
++    "use_laplace": true,
++    "laplace_alpha": 1.0,
++    "laplace_range_k": 0.8,
++    "laplace_range_v": 0.5,
++    "beta_k": 0.7,
++    "beta_v": 0.5,
++    "k_log_clip": 2.0,
++    "v_log_clip": 1.5,
++    "layer_dependent_gate": false,
++    "use_distance_laplace": true,
++    "distance_laplace_alpha": 0.5,
++    "distance_laplace_range": 1.0,
++    "distance_laplace_clip": 1.0,
++    "use_wpe": false,
++    "use_salience_bias": true,
++    "salience_alpha": 1.0,
++    "salience_range": 2.0,
++    "salience_clip": 3.0,
++    "baseline_type": "hla_v2_aggressive_gates_salience"
++  },
++  "variant": "hla_v2_aggressive_gates_salience"
++}
+diff --git a/configs/tpu3_200m_hla_v2_s44.json b/configs/tpu3_200m_hla_v2_s44.json
+new file mode 100644
+index 0000000..7ba671c
+--- /dev/null
++++ b/configs/tpu3_200m_hla_v2_s44.json
+@@ -0,0 +1,75 @@
++{
++  "_doc": "V2 recipe, seed 44 (paired stats; same-seed pair shares init).",
++  "seed": 44,
++  "save_dir": "runs/tpu3_200m_hla_v2_s44",
++  "run_name": "tpu3_200m_hla_v2_s44",
++  "train_path": "data/train_fixed_tokens.bin",
++  "val_path": "data/val_fixed_tokens.bin",
++  "init_ckpt": "inits/init_tpu3_200m_hla_v2_s44.pt",
++  "init_strict": true,
++  "check_init_hla_identity": true,
++  "expected_vocab_size": 50257,
++  "batch_size_per_device": 16,
++  "eval_batch_size_per_device": 16,
++  "grad_accum": 1,
++  "num_workers": 0,
++  "dataloader_prefetch_factor": 4,
++  "max_steps": 20000,
++  "warmup": 1000,
++  "grad_clip": 1.0,
++  "lr": 0.0006,
++  "min_lr": 6e-05,
++  "weight_decay": 0.1,
++  "betas": [
++    0.9,
++    0.95
++  ],
++  "adam_eps": 1e-08,
++  "log_every": 100,
++  "val_every": 500,
++  "svd_every": 2000,
++  "val_batches": 50,
++  "resume_every": 500,
++  "save_every": 0,
++  "keep_last_checkpoints": 2,
++  "min_free_gb": 5.0,
++  "num_cores": 8,
++  "xla_loader_prefetch_size": 8,
++  "xla_device_prefetch_size": 4,
++  "validate_dataset_full": false,
++  "fail_on_nonfinite_val": true,
++  "allow_multiple_epochs": false,
++  "model": {
++    "block_size": 2048,
++    "vocab_size": 50257,
++    "n_layer": 12,
++    "n_head": 16,
++    "n_embd": 1024,
++    "dropout": 0.0,
++    "bias": false,
++    "gradient_checkpointing": true,
++    "fused_swiglu": true,
++    "use_rope": true,
++    "phase_mult": 0.15,
++    "use_laplace": true,
++    "laplace_alpha": 1.0,
++    "laplace_range_k": 0.8,
++    "laplace_range_v": 0.5,
++    "beta_k": 0.7,
++    "beta_v": 0.5,
++    "k_log_clip": 2.0,
++    "v_log_clip": 1.5,
++    "layer_dependent_gate": false,
++    "use_distance_laplace": true,
++    "distance_laplace_alpha": 0.5,
++    "distance_laplace_range": 1.0,
++    "distance_laplace_clip": 1.0,
++    "use_wpe": false,
++    "use_salience_bias": true,
++    "salience_alpha": 1.0,
++    "salience_range": 2.0,
++    "salience_clip": 3.0,
++    "baseline_type": "hla_v2_aggressive_gates_salience"
++  },
++  "variant": "hla_v2_aggressive_gates_salience"
++}
+diff --git a/configs/tpu3_300m_base_s42.json b/configs/tpu3_300m_base_s42.json
+new file mode 100644
+index 0000000..efa7bb3
+--- /dev/null
++++ b/configs/tpu3_300m_base_s42.json
+@@ -0,0 +1,69 @@
++{
++  "_doc": "Base for matched HLA. 306.6M params, 6.55B tokens (~21.4 tok/param). Matched FLOPs to HLA at F=1.20e19. Expected ~4.0h per run on TPU v5e-8. [TPU v3-8 month grant: local TPU-VM paths, same recipe]",
++  "seed": 42,
++  "save_dir": "runs/tpu3_300m_base_s42",
++  "run_name": "tpu3_300m_base_s42",
++  "train_path": "data/train_fixed_tokens.bin",
++  "val_path": "data/val_fixed_tokens.bin",
++  "init_ckpt": "inits/init_tpu3_300m_base_s42.pt",
++  "init_strict": true,
++  "check_init_hla_identity": true,
++  "expected_vocab_size": 50257,
++  "batch_size_per_device": 16,
++  "eval_batch_size_per_device": 16,
++  "grad_accum": 1,
++  "num_workers": 0,
++  "dataloader_prefetch_factor": 4,
++  "max_steps": 25000,
++  "warmup": 1000,
++  "grad_clip": 1.0,
++  "lr": 0.0006,
++  "min_lr": 6e-05,
++  "weight_decay": 0.1,
++  "betas": [
++    0.9,
++    0.95
++  ],
++  "adam_eps": 1e-08,
++  "log_every": 100,
++  "val_every": 500,
++  "svd_every": 2000,
++  "val_batches": 50,
++  "resume_every": 500,
++  "save_every": 0,
++  "keep_last_checkpoints": 2,
++  "min_free_gb": 5.0,
++  "num_cores": 8,
++  "xla_loader_prefetch_size": 8,
++  "xla_device_prefetch_size": 4,
++  "validate_dataset_full": false,
++  "fail_on_nonfinite_val": true,
++  "allow_multiple_epochs": false,
++  "model": {
++    "block_size": 2048,
++    "vocab_size": 50257,
++    "n_layer": 20,
++    "n_head": 16,
++    "n_embd": 1024,
++    "dropout": 0.0,
++    "bias": false,
++    "gradient_checkpointing": true,
++    "fused_swiglu": true,
++    "use_rope": true,
++    "phase_mult": 0.0,
++    "use_laplace": true,
++    "laplace_alpha": 0.0,
++    "laplace_range_k": 0.35,
++    "laplace_range_v": 0.2,
++    "beta_k": 0.5,
++    "beta_v": 0.25,
++    "k_log_clip": 1.5,
++    "v_log_clip": 1.0,
++    "layer_dependent_gate": false,
++    "use_distance_laplace": true,
++    "distance_laplace_alpha": 0.0,
++    "distance_laplace_range": 1.0,
++    "distance_laplace_clip": 1.0,
++    "use_wpe": false
++  }
++}
+diff --git a/configs/tpu3_300m_hla_s42.json b/configs/tpu3_300m_hla_s42.json
+new file mode 100644
+index 0000000..f4fac09
+--- /dev/null
++++ b/configs/tpu3_300m_hla_s42.json
+@@ -0,0 +1,69 @@
++{
++  "_doc": "HLA for matched experiments. 328.2M params (+7% vs base), 6.12B tokens (~18.7 tok/param). Matched FLOPs to base at F=1.21e19. Expected ~4.0h per run on TPU v5e-8. [TPU v3-8 month grant: local TPU-VM paths, same recipe]",
++  "seed": 42,
++  "save_dir": "runs/tpu3_300m_hla_s42",
++  "run_name": "tpu3_300m_hla_s42",
++  "train_path": "data/train_fixed_tokens.bin",
++  "val_path": "data/val_fixed_tokens.bin",
++  "init_ckpt": "inits/init_tpu3_300m_hla_s42.pt",
++  "init_strict": true,
++  "check_init_hla_identity": true,
++  "expected_vocab_size": 50257,
++  "batch_size_per_device": 16,
++  "eval_batch_size_per_device": 16,
++  "grad_accum": 1,
++  "num_workers": 0,
++  "dataloader_prefetch_factor": 4,
++  "max_steps": 23354,
++  "warmup": 1000,
++  "grad_clip": 1.0,
++  "lr": 0.0006,
++  "min_lr": 6e-05,
++  "weight_decay": 0.1,
++  "betas": [
++    0.9,
++    0.95
++  ],
++  "adam_eps": 1e-08,
++  "log_every": 100,
++  "val_every": 500,
++  "svd_every": 2000,
++  "val_batches": 50,
++  "resume_every": 500,
++  "save_every": 0,
++  "keep_last_checkpoints": 2,
++  "min_free_gb": 5.0,
++  "num_cores": 8,
++  "xla_loader_prefetch_size": 8,
++  "xla_device_prefetch_size": 4,
++  "validate_dataset_full": false,
++  "fail_on_nonfinite_val": true,
++  "allow_multiple_epochs": false,
++  "model": {
++    "block_size": 2048,
++    "vocab_size": 50257,
++    "n_layer": 20,
++    "n_head": 16,
++    "n_embd": 1024,
++    "dropout": 0.0,
++    "bias": false,
++    "gradient_checkpointing": true,
++    "fused_swiglu": true,
++    "use_rope": true,
++    "phase_mult": 0.15,
++    "use_laplace": true,
++    "laplace_alpha": 1.0,
++    "laplace_range_k": 0.35,
++    "laplace_range_v": 0.2,
++    "beta_k": 0.5,
++    "beta_v": 0.25,
++    "k_log_clip": 1.5,
++    "v_log_clip": 1.0,
++    "layer_dependent_gate": false,
++    "use_distance_laplace": true,
++    "distance_laplace_alpha": 0.5,
++    "distance_laplace_range": 1.0,
++    "distance_laplace_clip": 1.0,
++    "use_wpe": false
++  }
++}
+diff --git a/configs/tpu3_700m_base_14b_s42.json b/configs/tpu3_700m_base_14b_s42.json
+new file mode 100644
+index 0000000..7581ae9
+--- /dev/null
++++ b/configs/tpu3_700m_base_14b_s42.json
+@@ -0,0 +1,77 @@
++{
++  "seed": 42,
++  "variant": "base_700m_parameter_matched_ablated_14b_ldg_distlap_rope",
++  "run_name": "tpu3_700m_base_14b_s42",
++  "save_dir": "runs/tpu3_700m_base_14b_s42",
++  "train_path": "data/train_fixed_tokens.bin",
++  "val_path": "data/val_fixed_tokens.bin",
++  "init_ckpt": "inits/init_tpu3_700m_base_14b_s42.pt",
++  "init_strict": true,
++  "check_init_hla_identity": true,
++  "expected_vocab_size": 50257,
++  "validate_dataset_full": false,
++  "batch_size_per_device": 1,
++  "eval_batch_size_per_device": 1,
++  "grad_accum": 32,
++  "max_steps": 53406,
++  "warmup": 1500,
++  "lr": 0.00026,
++  "min_lr": 2.6e-05,
++  "weight_decay": 0.1,
++  "betas": [
++    0.9,
++    0.95
++  ],
++  "adam_eps": 1e-08,
++  "grad_clip": 1.0,
++  "log_every": 100,
++  "val_every": 500,
++  "svd_every": 2000,
++  "val_batches": 64,
++  "resume_every": 250,
++  "save_every": 5000,
++  "keep_last_checkpoints": 4,
++  "min_free_gb": 20,
++  "num_cores": 8,
++  "xmp_start_method": "fork",
++  "num_workers": 2,
++  "allow_multiple_epochs": false,
++  "fail_on_nonfinite_val": true,
++  "xla_autocast": false,
++  "model": {
++    "block_size": 1024,
++    "vocab_size": 50257,
++    "n_layer": 24,
++    "n_head": 16,
++    "n_embd": 1408,
++    "dropout": 0.0,
++    "bias": false,
++    "phase_mult": 0.0,
++    "use_laplace": true,
++    "laplace_alpha": 0.0,
++    "laplace_range_k": 0.5,
++    "laplace_range_v": 0.3,
++    "beta_k": 0.5,
++    "beta_v": 0.35,
++    "gradient_checkpointing": true,
++    "baseline_type": "parameter_matched_ablated_700m14b_ldg_distlap_rope",
++    "padded_vocab_size": 50304,
++    "fused_swiglu": true,
++    "ffn_hidden_multiple_of": 64,
++    "attention_backend": "manual",
++    "k_log_clip": 1.5,
++    "v_log_clip": 1.0,
++    "layer_dependent_gate": true,
++    "use_distance_laplace": true,
++    "distance_laplace_alpha": 0.0,
++    "distance_laplace_range": 1.0,
++    "distance_laplace_clip": 1.0,
++    "use_rope": true,
++    "rope_theta": 10000.0,
++    "use_wpe": false
++  },
++  "dataloader_prefetch_factor": 4,
++  "xla_loader_prefetch_size": 8,
++  "xla_device_prefetch_size": 4,
++  "_doc": " [TPU v3-8 month grant: local TPU-VM paths, same recipe]"
++}
+diff --git a/configs/tpu3_700m_hla_14b_s42.json b/configs/tpu3_700m_hla_14b_s42.json
+new file mode 100644
+index 0000000..afb6a8f
+--- /dev/null
++++ b/configs/tpu3_700m_hla_14b_s42.json
+@@ -0,0 +1,77 @@
++{
++  "seed": 42,
++  "variant": "hla_v4_700m_safe_scale_14b_ldg_distlap_rope",
++  "run_name": "tpu3_700m_hla_14b_s42",
++  "save_dir": "runs/tpu3_700m_hla_14b_s42",
++  "train_path": "data/train_fixed_tokens.bin",
++  "val_path": "data/val_fixed_tokens.bin",
++  "init_ckpt": "inits/init_tpu3_700m_hla_14b_s42.pt",
++  "init_strict": true,
++  "check_init_hla_identity": true,
++  "expected_vocab_size": 50257,
++  "validate_dataset_full": false,
++  "batch_size_per_device": 1,
++  "eval_batch_size_per_device": 1,
++  "grad_accum": 32,
++  "max_steps": 53406,
++  "warmup": 1500,
++  "lr": 0.00026,
++  "min_lr": 2.6e-05,
++  "weight_decay": 0.1,
++  "betas": [
++    0.9,
++    0.95
++  ],
++  "adam_eps": 1e-08,
++  "grad_clip": 1.0,
++  "log_every": 100,
++  "val_every": 500,
++  "svd_every": 2000,
++  "val_batches": 64,
++  "resume_every": 250,
++  "save_every": 5000,
++  "keep_last_checkpoints": 4,
++  "min_free_gb": 20,
++  "num_cores": 8,
++  "xmp_start_method": "fork",
++  "num_workers": 2,
++  "allow_multiple_epochs": false,
++  "fail_on_nonfinite_val": true,
++  "xla_autocast": false,
++  "model": {
++    "block_size": 1024,
++    "vocab_size": 50257,
++    "n_layer": 24,
++    "n_head": 16,
++    "n_embd": 1408,
++    "dropout": 0.0,
++    "bias": false,
++    "phase_mult": 0.15,
++    "use_laplace": true,
++    "laplace_alpha": 1.0,
++    "laplace_range_k": 0.5,
++    "laplace_range_v": 0.3,
++    "beta_k": 0.5,
++    "beta_v": 0.35,
++    "gradient_checkpointing": true,
++    "baseline_type": "hla_v4_safe_scale_700m14b_ldg_distlap_rope",
++    "padded_vocab_size": 50304,
++    "fused_swiglu": true,
++    "ffn_hidden_multiple_of": 64,
++    "attention_backend": "manual",
++    "k_log_clip": 1.5,
++    "v_log_clip": 1.0,
++    "layer_dependent_gate": true,
++    "use_distance_laplace": true,
++    "distance_laplace_alpha": 0.25,
++    "distance_laplace_range": 1.0,
++    "distance_laplace_clip": 1.0,
++    "use_rope": true,
++    "rope_theta": 10000.0,
++    "use_wpe": false
++  },
++  "dataloader_prefetch_factor": 4,
++  "xla_loader_prefetch_size": 8,
++  "xla_device_prefetch_size": 4,
++  "_doc": " [TPU v3-8 month grant: local TPU-VM paths, same recipe]"
++}
+diff --git a/configs/tpu3_abl_base_template.json b/configs/tpu3_abl_base_template.json
+new file mode 100644
+index 0000000..ff1da19
+--- /dev/null
++++ b/configs/tpu3_abl_base_template.json
+@@ -0,0 +1,75 @@
++{
++  "_doc": "Ablation-matrix template (v2 recipe @ 7000 steps ~ 1.8B tokens): long enough for stable mechanism separation at 200M (loss curves separate well before 1B tokens in this regime), short enough for 42 runs x ~3.5h on TPU v3-8. Feed to make_ablation_configs --base/--hla.",
++  "seed": 42,
++  "save_dir": "runs/tpu3_abl_base_template",
++  "run_name": "tpu3_abl_base_template",
++  "train_path": "data/train_fixed_tokens.bin",
++  "val_path": "data/val_fixed_tokens.bin",
++  "init_ckpt": "inits/init_tpu3_abl_base_template.pt",
++  "init_strict": true,
++  "check_init_hla_identity": true,
++  "expected_vocab_size": 50257,
++  "batch_size_per_device": 16,
++  "eval_batch_size_per_device": 16,
++  "grad_accum": 1,
++  "num_workers": 0,
++  "dataloader_prefetch_factor": 4,
++  "max_steps": 7000,
++  "warmup": 350,
++  "grad_clip": 1.0,
++  "lr": 0.0006,
++  "min_lr": 6e-05,
++  "weight_decay": 0.1,
++  "betas": [
++    0.9,
++    0.95
++  ],
++  "adam_eps": 1e-08,
++  "log_every": 100,
++  "val_every": 500,
++  "svd_every": 2000,
++  "val_batches": 50,
++  "resume_every": 500,
++  "save_every": 0,
++  "keep_last_checkpoints": 2,
++  "min_free_gb": 5.0,
++  "num_cores": 8,
++  "xla_loader_prefetch_size": 8,
++  "xla_device_prefetch_size": 4,
++  "validate_dataset_full": false,
++  "fail_on_nonfinite_val": true,
++  "allow_multiple_epochs": false,
++  "model": {
++    "block_size": 2048,
++    "vocab_size": 50257,
++    "n_layer": 12,
++    "n_head": 16,
++    "n_embd": 1024,
++    "dropout": 0.0,
++    "bias": false,
++    "gradient_checkpointing": true,
++    "fused_swiglu": true,
++    "use_rope": true,
++    "phase_mult": 0.0,
++    "use_laplace": true,
++    "laplace_alpha": 0.0,
++    "laplace_range_k": 0.8,
++    "laplace_range_v": 0.5,
++    "beta_k": 0.7,
++    "beta_v": 0.5,
++    "k_log_clip": 2.0,
++    "v_log_clip": 1.5,
++    "layer_dependent_gate": false,
++    "use_distance_laplace": true,
++    "distance_laplace_alpha": 0.0,
++    "distance_laplace_range": 1.0,
++    "distance_laplace_clip": 1.0,
++    "use_wpe": false,
++    "use_salience_bias": true,
++    "salience_alpha": 0.0,
++    "salience_range": 2.0,
++    "salience_clip": 3.0,
++    "baseline_type": "base_pm_ablated_v2"
++  },
++  "variant": "base_pm_ablated_v2"
++}
+diff --git a/configs/tpu3_abl_hla_template.json b/configs/tpu3_abl_hla_template.json
+new file mode 100644
+index 0000000..8daa082
+--- /dev/null
++++ b/configs/tpu3_abl_hla_template.json
+@@ -0,0 +1,75 @@
++{
++  "_doc": "Ablation-matrix template (v2 recipe @ 7000 steps ~ 1.8B tokens): long enough for stable mechanism separation at 200M (loss curves separate well before 1B tokens in this regime), short enough for 42 runs x ~3.5h on TPU v3-8. Feed to make_ablation_configs --base/--hla.",
++  "seed": 42,
++  "save_dir": "runs/tpu3_abl_hla_template",
++  "run_name": "tpu3_abl_hla_template",
++  "train_path": "data/train_fixed_tokens.bin",
++  "val_path": "data/val_fixed_tokens.bin",
++  "init_ckpt": "inits/init_tpu3_abl_hla_template.pt",
++  "init_strict": true,
++  "check_init_hla_identity": true,
++  "expected_vocab_size": 50257,
++  "batch_size_per_device": 16,
++  "eval_batch_size_per_device": 16,
++  "grad_accum": 1,
++  "num_workers": 0,
++  "dataloader_prefetch_factor": 4,
++  "max_steps": 7000,
++  "warmup": 350,
++  "grad_clip": 1.0,
++  "lr": 0.0006,
++  "min_lr": 6e-05,
++  "weight_decay": 0.1,
++  "betas": [
++    0.9,
++    0.95
++  ],
++  "adam_eps": 1e-08,
++  "log_every": 100,
++  "val_every": 500,
++  "svd_every": 2000,
++  "val_batches": 50,
++  "resume_every": 500,
++  "save_every": 0,
++  "keep_last_checkpoints": 2,
++  "min_free_gb": 5.0,
++  "num_cores": 8,
++  "xla_loader_prefetch_size": 8,
++  "xla_device_prefetch_size": 4,
++  "validate_dataset_full": false,
++  "fail_on_nonfinite_val": true,
++  "allow_multiple_epochs": false,
++  "model": {
++    "block_size": 2048,
++    "vocab_size": 50257,
++    "n_layer": 12,
++    "n_head": 16,
++    "n_embd": 1024,
++    "dropout": 0.0,
++    "bias": false,
++    "gradient_checkpointing": true,
++    "fused_swiglu": true,
++    "use_rope": true,
++    "phase_mult": 0.15,
++    "use_laplace": true,
++    "laplace_alpha": 1.0,
++    "laplace_range_k": 0.8,
++    "laplace_range_v": 0.5,
++    "beta_k": 0.7,
++    "beta_v": 0.5,
++    "k_log_clip": 2.0,
++    "v_log_clip": 1.5,
++    "layer_dependent_gate": false,
++    "use_distance_laplace": true,
++    "distance_laplace_alpha": 0.5,
++    "distance_laplace_range": 1.0,
++    "distance_laplace_clip": 1.0,
++    "use_wpe": false,
++    "use_salience_bias": true,
++    "salience_alpha": 1.0,
++    "salience_range": 2.0,
++    "salience_clip": 3.0,
++    "baseline_type": "hla_v2_aggressive_gates_salience"
++  },
++  "variant": "hla_v2_aggressive_gates_salience"
++}
+diff --git a/docs/EXPERIMENT_CARD.md b/docs/EXPERIMENT_CARD.md
+index b8143c0..97c2754 100644
+--- a/docs/EXPERIMENT_CARD.md
++++ b/docs/EXPERIMENT_CARD.md
+@@ -35,6 +35,24 @@ headline number used everything at once.
+ | `forget` arm | forget only (FoX baseline) | all HLA mechanisms |
+ | `qtemp` arm | qtemp only | all others |
+ 
++## Pre-registered decision rules for architecture simplification
++
++The mechanism set is the UNION of hypotheses, not the claim that every part
++is necessary. Two rules, committed before any headline run, convert the
++ablation matrix into pruning decisions (protection against both kitchen-sink
++criticism and post-hoc cherry-picking):
++
++- **R-A (arm pruning)**: any mechanism whose single-factor arm shows no gain
++  AND whose leave-one-out arm shows no loss (both within 2x seed std at 200M)
++  is dropped from the recommended recipe; the paper reports the minimal set.
++- **R-B (gate merging)**: `gate_redundancy_statistics` (pairwise Pearson
++  between the K/V/salience/distance gates, logged by checkpoint analysis) is
++  the pre-registered merge criterion: any gate pair with |corr| > 0.9 across
++  seeds at 200M is merged into a shared projection in v6. We measure
++  redundancy instead of penalizing it - an auxiliary orthogonality loss
++  would change the training objective and break the sterile base-vs-HLA
++  comparison (same-objective invariant I5).
++
+ ## Pre-registered decisions (locked before headline runs)
+ | Decision | Value | Rationale |
+ |---|---|---|
+diff --git a/docs/METRICS.md b/docs/METRICS.md
+index 37bbfac..c809968 100644
+--- a/docs/METRICS.md
++++ b/docs/METRICS.md
+@@ -208,6 +208,24 @@ from the second `[A]` back to the token AFTER the first `[A]`, per head.
+ the *mechanism* (attention pattern). Reported per-layer max/mean over heads +
+ global max — the standard way to chart emergence of induction circuitry.
+ 
++### `gate_redundancy_statistics(model)`
++
++Pairwise Pearson correlation between the four per-token content gates
++(K, V, salience, distance), flattened over batch x tokens x heads, averaged
++over layers: `gate_corr_kv`, `gate_corr_ksal`, ... plus the scalar
++`gate_redundancy_mean_abs` (mean |off-diagonal|).
++
++- ~0 - gates specialize (four mechanisms earn their parameters);
++- |corr| -> 1 - redundant parameterization; the pre-registered rule R-B
++  (EXPERIMENT_CARD) merges any pair with |corr| > 0.9 across seeds in v6.
++- NaN at identity init (zero gates have no correlation structure) -
++  deliberately NaN, like the SVD metrics.
++
++This is the measurement-first answer to "why not an orthogonality loss?":
++an aux loss would change the objective (breaking the same-loss sterility
++invariant) and presume the answer. Ground-truth tested: cloned gates give
++corr = 1.0, independent random gates stay below 0.9.
++
+ ### `attention_head_similarity(model)`
+ 
+ Mean pairwise Jensen–Shannon divergence between per-head attention
+diff --git a/docs/THEORY.md b/docs/THEORY.md
+index 2f864b6..bef7b4e 100644
+--- a/docs/THEORY.md
++++ b/docs/THEORY.md
+@@ -265,7 +265,73 @@ cannot, and no honest theory can.** Here is precisely where mathematics stops:
+    the 300M/700M points trades scientific strength for time, which reviewers
+    will notice but which you may decide is worth it.
+ 
+-## 4. Why the FoX-family gate is in the codebase (and why it is not "stealing")
++## 4. Design non-goals (attacks we reject on purpose, with reasons)
++
++Recurring reviewer suggestions we decline - each violates identity-init,
++sterility, or the pre-registered protocol. Recorded here so the rebuttal is
++a citation, not an improvisation.
++
++**Learned floor beta = sigmoid(W_b x).** The floor (1-beta) is a bounded
++GUARANTEE (Theorem 4's envelope), not a modeling choice: making it
++input-dependent destroys the analytic bound exactly where it matters (a
++learned beta -> 1 removes the floor mid-training, silently). Identity init is
++also lost: sigmoid(0) = 0.5 != the shipped beta values, so a zero-initialized
++W_b CHANGES the function at step 0. The unbounded-suppression role already
++has a dedicated, floor-free channel: the additive salience bias. This
++division (bounded multiplicative whisper vs unbounded additive silence) is a
++feature, stated syntactically in the unified formula - not an oversight.
++
++**Learned clip bounds.** Clips are numerical guards proven never to bind in
++shipped configs (audit E3: slack >= 2x). A learnable guard can learn to bind
++- turning a safety mechanism into an uninstrumented modeling knob and
++invalidating the E3 audit and the Theorem-4 envelope. The learnable degrees
++of freedom already exist one level down (W_range_* with range_flex).
++
++**Auxiliary losses (gate entropy, head orthogonality, disentanglement).**
++Any aux term changes the objective, so base-vs-HLA would no longer compare
++architectures under the SAME loss - the core sterility invariant. Each term
++also ships loss-weight hyperparameters that would need per-arm tuning,
++violating the fairness invariant (hparams tuned on base only). We measure
++what these losses would enforce (gate_redundancy_statistics, gate_erank,
++attention_head_similarity, sat_frac) and let the ablation matrix decide;
++pre-registered rules R-A/R-B in EXPERIMENT_CARD convert measurements into
++architecture changes for v6.
++
++**Sigmoid mixing instead of exponential.** sigmoid caps mix at 1.0 -
++amplification becomes impossible, killing half the mechanism (shipped v2
++envelope reaches x2.20 amplification; measured, audit E1). Log-space exp is
++symmetric in suppress/amplify and composes additively with the score-space
++biases. The floor handles the "smooth near identity" concern.
++
++**Full rotation matrices instead of pairwise.** An unconstrained d x d map
++is not an isometry - it can rescale norms, which re-entangles retrieval
++geometry with magnitude and destroys Theorem 3 (and the gauge reading of
++Theorem 6). Constraining to SO(d) requires expm/Cayley (O(d^2) params,
++numerically fragile on TPU bf16). Commuting 2D planes are the standard,
++RoPE-compatible parameterization (Corollary 7.1 depends on it); per-plane
++budgets already relax uniformity.
++
++**Cross-layer gate conditioning (gate_l = f(gate_{l-1}, x_l)).** Introduces
++a second recurrent pathway outside the residual stream: breaks per-layer
++identity-init locality (a layer's mechanism is no longer zero-parameter
++silent if its input gate is nonzero), complicates KV-cache exactness, and
++duplicates what the residual stream already provides - layer l's x ALREADY
++contains layer l-1's outputs. The depth profile (lambda_l, learnable temp)
++is the sanctioned cross-layer axis: monotone, bounded, identity at init.
++
++**Non-zero / per-layer-scaled gate init.** Zero init IS the sterility
++guarantee (bit-exact base at step 0, Theorem 1); any symmetry-breaking init
++trades the central claim for an unproven optimization hunch. Symmetry breaks
++through the input projections (W_gate rows see different x-statistics from
++step 1); mech_grad_* logging verifies gradients are alive (Theorem 5).
++
++**Warmup scheduling of alphas.** Alpha ramps change the effective
++architecture during training, confounding "mechanism helps" with "curriculum
++helps" - a new axis the ablation matrix cannot isolate. The identity init
++already provides a natural learned ramp: mechanisms grow from exact zero at
++whatever rate the data demands (observable in gate_abs_mean / angle_std).
++
++## 5. Why the FoX-family gate is in the codebase (and why it is not "stealing")
+ 
+ The forget gate is implemented as a **baseline arm**, clearly labeled
+ FoX-family with citation, OFF by default in every HLA config. Reproducing a
+diff --git a/scripts/analyze_checkpoint.py b/scripts/analyze_checkpoint.py
+index 1ba18dc..83a58f2 100644
+--- a/scripts/analyze_checkpoint.py
++++ b/scripts/analyze_checkpoint.py
+@@ -354,6 +354,11 @@ def main() -> None:
+         result["prefix_matching"] = prefix_matching_score(model, device=device, batch_size=1)
+     except Exception as e:  # vocab too small etc.
+         result["prefix_matching"] = {"error": str(e)}
++    try:
++        from src.eval import gate_redundancy_statistics
++        result["gate_redundancy"] = gate_redundancy_statistics(model, device=device)
++    except Exception as e:
++        result["gate_redundancy"] = {"error": str(e)}
+ 
+     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+     with open(args.out, "w", encoding="utf-8") as f:
+diff --git a/scripts/bench.py b/scripts/bench.py
+new file mode 100644
+index 0000000..0b8bac2
+--- /dev/null
++++ b/scripts/bench.py
+@@ -0,0 +1,98 @@
++# Copyright 2026 Slyatski Ilya
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++
++
++"""Micro-benchmark: fwd/bwd wall-clock for a base/HLA pair (nanoGPT bench.py analog).
++
++Measures the REAL mechanism overhead on this host - the honest companion to
++scripts/profile_flops.py (analytic MACs). Reports median step time and
++tokens/sec for both configs plus the ratio. CPU by default; small shapes so
++it runs anywhere (the TPU number comes from the trainer's own tokens_per_sec).
++
++Usage:
++    python scripts/bench.py --base configs/200m_base_s42.json \
++        --hla configs/200m_hla_s42.json --steps 10 --seq-len 256
++"""
++from __future__ import annotations
++
++import argparse
++import json
++import os
++import statistics
++import sys
++import time
++
++import torch
++
++ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++if ROOT not in sys.path:
++    sys.path.insert(0, ROOT)
++
++from src.model import GPT, GPTConfig  # noqa: E402
++
++
++def bench_config(path: str, *, steps: int, batch: int, seq_len: int,
++                 overrides: dict) -> dict:
++    cfg = json.load(open(path, encoding="utf-8"))["model"]
++    cfg.update(overrides)
++    model = GPT(GPTConfig(**cfg)).train()
++    T = min(seq_len, cfg["block_size"])
++    x = torch.randint(0, cfg["vocab_size"], (batch, T))
++    times = []
++    for i in range(steps + 2):  # 2 warmup
++        t0 = time.perf_counter()
++        _, loss = model(x, x)
++        loss.backward()
++        model.zero_grad(set_to_none=True)
++        if i >= 2:
++            times.append(time.perf_counter() - t0)
++    med = statistics.median(times)
++    return {"median_step_sec": med, "tokens_per_sec": batch * T / med,
++            "params": model.parameter_count()}
++
++
++def main() -> None:
++    ap = argparse.ArgumentParser(description="fwd/bwd micro-benchmark for a config pair")
++    ap.add_argument("--base", required=True)
++    ap.add_argument("--hla", required=True)
++    ap.add_argument("--steps", type=int, default=10)
++    ap.add_argument("--batch", type=int, default=2)
++    ap.add_argument("--seq-len", type=int, default=256)
++    ap.add_argument("--n-layer", type=int, default=None,
++                    help="override for quick runs on small hosts (keeps fairness: same for both)")
++    ap.add_argument("--out", default=None, help="optional JSON output path")
++    args = ap.parse_args()
++
++    overrides = {"gradient_checkpointing": False}
++    if args.n_layer:
++        overrides["n_layer"] = args.n_layer
++
++    results = {}
++    for name, path in (("base", args.base), ("hla", args.hla)):
++        r = bench_config(path, steps=args.steps, batch=args.batch,
++                         seq_len=args.seq_len, overrides=overrides)
++        results[name] = r
++        print(f"{name:5s}: {r['median_step_sec'] * 1e3:8.1f} ms/step  "
++              f"{r['tokens_per_sec']:10.0f} tok/s  ({r['params']:,} params)")
++
++    ratio = results["hla"]["median_step_sec"] / results["base"]["median_step_sec"]
++    results["hla_over_base_ratio"] = ratio
++    print(f"\nHLA/base wall-clock ratio: {ratio:.3f}  "
++          f"(analytic FLOPs ratio: see scripts/profile_flops.py)")
++    if args.out:
++        with open(args.out, "w", encoding="utf-8") as f:
++            json.dump(results, f, indent=2)
++        print(f"wrote {args.out}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/sample.py b/scripts/sample.py
+new file mode 100644
+index 0000000..f3952c3
+--- /dev/null
++++ b/scripts/sample.py
+@@ -0,0 +1,102 @@
++# Copyright 2026 Slyatski Ilya
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++
++
++"""Sample text from a trained checkpoint (nanoGPT-style qualitative check).
++
++The quantitative story lives in the CSV metrics; this is the 30-second sanity
++look at what the model actually says. Works on CPU.
++
++Usage:
++    python scripts/sample.py --checkpoint runs/200m_hla_s42/best_....pt \
++        --config configs/200m_hla_s42.json --start "The meaning of life is" \
++        --num-samples 3 --max-new-tokens 100
++    # token-id prompt for models trained on dummy/custom data:
++    python scripts/sample.py --checkpoint init.pt --start-ids 1,2,3 --greedy
++"""
++from __future__ import annotations
++
++import argparse
++import json
++import os
++import sys
++
++import torch
++
++ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++if ROOT not in sys.path:
++    sys.path.insert(0, ROOT)
++
++from src.model import GPT, GPTConfig  # noqa: E402
++
++
++def load_model(ckpt_path: str, config_path: str | None):
++    try:
++        payload = torch.load(ckpt_path, map_location="cpu", weights_only=True)
++    except Exception:
++        payload = torch.load(ckpt_path, map_location="cpu", weights_only=False)
++    state = payload.get("model", payload) if isinstance(payload, dict) else payload
++    if config_path:
++        model_cfg = json.load(open(config_path, encoding="utf-8"))["model"]
++    elif isinstance(payload, dict) and "config" in payload:
++        model_cfg = payload["config"]["model"]
++    else:
++        raise SystemExit("No config: pass --config or use a checkpoint that embeds one")
++    model = GPT(GPTConfig(**model_cfg))
++    state = {k: v.float() if torch.is_tensor(v) and torch.is_floating_point(v) else v
++             for k, v in state.items()}
++    model.load_state_dict(state, strict=True)
++    return model.eval()
++
++
++def main() -> None:
++    ap = argparse.ArgumentParser(description="Sample from a checkpoint (CPU-friendly)")
++    ap.add_argument("--checkpoint", required=True)
++    ap.add_argument("--config", default=None, help="run config JSON (else read from checkpoint)")
++    ap.add_argument("--start", default=None, help="text prompt (needs tiktoken)")
++    ap.add_argument("--start-ids", default=None, help="comma-separated token ids (no tokenizer needed)")
++    ap.add_argument("--num-samples", type=int, default=1)
++    ap.add_argument("--max-new-tokens", type=int, default=100)
++    ap.add_argument("--temperature", type=float, default=0.8)
++    ap.add_argument("--top-k", type=int, default=200)
++    ap.add_argument("--greedy", action="store_true")
++    ap.add_argument("--seed", type=int, default=1337)
++    args = ap.parse_args()
++
++    torch.manual_seed(args.seed)
++    model = load_model(args.checkpoint, args.config)
++
++    enc = None
++    if args.start_ids is not None:
++        ids = [int(t) for t in args.start_ids.split(",")]
++    elif args.start is not None:
++        try:
++            import tiktoken
++        except ImportError:
++            raise SystemExit("text prompts need tiktoken (pip install tiktoken); "
++                             "or use --start-ids for raw token ids")
++        enc = tiktoken.get_encoding("gpt2")
++        ids = enc.encode_ordinary(args.start)
++    else:
++        ids = [0]
++
++    x = torch.tensor(ids, dtype=torch.long)[None, ...]
++    for i in range(args.num_samples):
++        y = model.generate(x, args.max_new_tokens, temperature=args.temperature,
++                           top_k=args.top_k, greedy=args.greedy)
++        out = y[0].tolist()
++        print(f"--- sample {i + 1} ---")
++        print(enc.decode(out) if enc is not None else out)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/src/eval.py b/src/eval.py
+index 7bd0e32..9bff5cc 100644
+--- a/src/eval.py
++++ b/src/eval.py
+@@ -737,6 +737,75 @@ def mechanism_knockout(model, batch, targets, mechanisms=("phase", "gates", "sal
+         model.train(was_training)
+ 
+ 
++@torch.no_grad()
++def gate_redundancy_statistics(model, device="cpu", seed: int = 42, batch_size: int = 2) -> Dict[str, float]:
++    """H3/M6 (round 7): do the four content gates (K, V, salience, distance)
++    learn the same function of x, or four different ones?
++
++    MEASUREMENT, deliberately not a regularizer: adding an orthogonality/
++    entropy auxiliary loss would (a) break the sterility invariant "base and
++    HLA optimize the SAME objective", (b) add tunable loss weights - an
++    un-preregistered hyperparameter axis, and (c) presume the answer. If
++    trained gates correlate near +-1, the honest conclusion is to MERGE
++    mechanisms in v6, not to force them apart with a penalty.
++
++    Reports, per layer (averaged over heads), pairwise Pearson correlation of
++    per-token gate activations across all token positions, plus the mean
++    absolute off-diagonal correlation as a single redundancy scalar:
++      gate_corr_kv, gate_corr_ksal, gate_corr_kd, gate_corr_vsal,
++      gate_corr_vd, gate_corr_sald, gate_redundancy_mean_abs.
++    ~0 => gates specialize; |corr| -> 1 => redundant parameterization.
++    At identity init every gate is exactly 0 => correlations are undefined;
++    reported as NaN (deliberately, like the SVD metrics)."""
++    was_training = model.training
++    prev_diag = bool(model.transformer.h[0].attn.capture_diagnostics)
++    prev_attn = bool(model.transformer.h[0].attn.capture_attention)
++    model.eval()
++    model.set_diagnostics(enabled=True)
++    try:
++        T = min(256, model.config.block_size)
++        g = torch.Generator(device="cpu")
++        g.manual_seed(seed)
++        tokens = torch.randint(0, model.config.vocab_size, (batch_size, T), generator=g).to(device)
++        model(tokens)
++
++        pair_sums: Dict[str, list] = {}
++        for block in model.transformer.h:
++            attn = block.attn
++            gates = {
++                "k": getattr(attn, "last_gate_k", None),
++                "v": getattr(attn, "last_gate_v", None),
++                "sal": getattr(attn, "last_gate_sal", None),
++                "d": getattr(attn, "last_gate_d", None),
++            }
++            flat = {}
++            for name, t in gates.items():
++                if t is None:
++                    continue
++                v = t.detach().float().reshape(-1)
++                if float(v.std()) > 1e-8:  # constant/zero gate -> corr undefined
++                    flat[name] = v
++            names = sorted(flat)
++            for i in range(len(names)):
++                for j in range(i + 1, len(names)):
++                    a, b = flat[names[i]], flat[names[j]]
++                    corr = float(torch.corrcoef(torch.stack([a, b]))[0, 1])
++                    pair_sums.setdefault(f"gate_corr_{names[i]}{names[j]}", []).append(corr)
++
++        out: Dict[str, float] = {}
++        all_abs: list = []
++        for key, vals in pair_sums.items():
++            out[key] = float(sum(vals) / len(vals))
++            all_abs.extend(abs(v) for v in vals)
++        out["gate_redundancy_mean_abs"] = (
++            float(sum(all_abs) / len(all_abs)) if all_abs else float("nan")
++        )
++        return out
++    finally:
++        model.set_diagnostics(enabled=prev_diag, capture_attention=prev_attn)
++        model.train(was_training)
++
++
+ @torch.no_grad()
+ def prefix_matching_score(model, device="cpu", seed: int = 42, batch_size: int = 4) -> Dict[str, float]:
+     """Canonical induction-head detector (Olsson et al. 2022): attention from
+@@ -799,5 +868,6 @@ __all__ = [
+     "mechanism_gradient_statistics",
+     "attention_head_similarity",
+     "mechanism_knockout",
++    "gate_redundancy_statistics",
+     "prefix_matching_score",
+ ]
+diff --git a/src/model.py b/src/model.py
+index 5395d59..7d3d231 100644
+--- a/src/model.py
++++ b/src/model.py
+@@ -279,6 +279,8 @@ class CausalSelfAttention(nn.Module):
+         self.last_distance_bias_abs_mean: Optional[torch.Tensor] = None
+         self.last_salience_bias_abs_mean: Optional[torch.Tensor] = None
+         self.last_salience_sat_frac: Optional[torch.Tensor] = None
++        self.last_gate_sal: Optional[torch.Tensor] = None
++        self.last_gate_d: Optional[torch.Tensor] = None
+         self.last_forget_bias_abs_mean: Optional[torch.Tensor] = None
+         self.last_forget_sat_frac: Optional[torch.Tensor] = None
+         self.last_qtemp_mean: Optional[torch.Tensor] = None
+@@ -593,11 +595,14 @@ class CausalSelfAttention(nn.Module):
+             with torch.no_grad():
+                 self.last_distance_bias_mean = dist_bias.detach().float().mean()
+                 self.last_distance_bias_abs_mean = dist_bias.detach().float().abs().mean()
++                if self.capture_diagnostics:
++                    self.last_gate_d = gate_d.detach()
+         elif self.capture_diagnostics:
+             with torch.no_grad():
+                 zero = torch.zeros((), device=x.device)
+                 self.last_distance_bias_mean = zero
+                 self.last_distance_bias_abs_mean = zero
++                self.last_gate_d = None
+ 
+         if self.use_salience_bias and self.salience_alpha != 0.0:
+             # Additive per-key salience: strong suppression/boost independent of
+@@ -611,11 +616,17 @@ class CausalSelfAttention(nn.Module):
+             with torch.no_grad():
+                 self.last_salience_bias_abs_mean = sal_bias.detach().float().abs().mean()
+                 self.last_salience_sat_frac = (gate_sal.detach().abs() > 0.99).float().mean()
++                if self.capture_diagnostics:
++                    # Full per-token tensor for the gate-redundancy probe
++                    # (round 7): do the four content gates learn the same
++                    # function or four different ones?
++                    self.last_gate_sal = gate_sal.detach()
+         elif self.capture_diagnostics:
+             with torch.no_grad():
+                 zero = torch.zeros((), device=x.device)
+                 self.last_salience_bias_abs_mean = zero
+                 self.last_salience_sat_frac = zero
++                self.last_gate_sal = None
+ 
+         if self.use_forget_gate and self.forget_alpha != 0.0:
+             # FoX-style cumulative gate (identity at init: W_gate_f = 0).
+diff --git a/tests/test_ablation_configs.py b/tests/test_ablation_configs.py
+index e254592..7f3f5dc 100644
+--- a/tests/test_ablation_configs.py
++++ b/tests/test_ablation_configs.py
+@@ -717,3 +717,58 @@ class TestRound6Science:
+                     break
+             return torch.cat(out)
+         assert torch.equal(first(0), first(2))
++
++
++class TestRound8Tooling:
++    """Round 8: nanoGPT-parity entrypoints (sample.py, bench.py) and their
++    contracts - qualitative sampling and honest wall-clock overhead."""
++
++    def test_sample_script_e2e_greedy(self, tmp_path):
++        """sample.py must produce tokens from an init checkpoint on CPU,
++        without a tokenizer (--start-ids path)."""
++        import subprocess
++        ckpt = tmp_path / "init.pt"
++        r0 = subprocess.run(
++            [sys.executable, os.path.join(ROOT, "src", "make_init.py"),
++             "--config", os.path.join(ROOT, "configs", "smoke_hla_s42.json"),
++             "--out", str(ckpt)], capture_output=True, text=True, cwd=ROOT)
++        assert r0.returncode == 0, r0.stderr[-300:]
++        r = subprocess.run(
++            [sys.executable, os.path.join(ROOT, "scripts", "sample.py"),
++             "--checkpoint", str(ckpt),
++             "--config", os.path.join(ROOT, "configs", "smoke_hla_s42.json"),
++             "--start-ids", "1,2,3", "--max-new-tokens", "5", "--greedy"],
++            capture_output=True, text=True, cwd=ROOT)
++        assert r.returncode == 0, r.stderr[-300:]
++        assert "sample 1" in r.stdout
++
++    def test_sample_deterministic_greedy(self, tmp_path):
++        import subprocess
++        ckpt = tmp_path / "init.pt"
++        subprocess.run([sys.executable, os.path.join(ROOT, "src", "make_init.py"),
++                        "--config", os.path.join(ROOT, "configs", "smoke_hla_s42.json"),
++                        "--out", str(ckpt)], capture_output=True, cwd=ROOT)
++        cmd = [sys.executable, os.path.join(ROOT, "scripts", "sample.py"),
++               "--checkpoint", str(ckpt),
++               "--config", os.path.join(ROOT, "configs", "smoke_hla_s42.json"),
++               "--start-ids", "5,6", "--max-new-tokens", "8", "--greedy"]
++        a = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT).stdout
++        b = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT).stdout
++        assert a == b, "greedy sampling must be deterministic"
++
++    def test_bench_script_reports_ratio(self, tmp_path):
++        """bench.py must report the wall-clock HLA/base ratio - the honest
++        companion number to the analytic FLOPs overhead."""
++        import subprocess, json as _json
++        out = tmp_path / "bench.json"
++        r = subprocess.run(
++            [sys.executable, os.path.join(ROOT, "scripts", "bench.py"),
++             "--base", os.path.join(ROOT, "configs", "smoke_hla_s42.json"),
++             "--hla", os.path.join(ROOT, "configs", "smoke_hla_s42.json"),
++             "--steps", "2", "--batch", "1", "--seq-len", "32", "--n-layer", "1",
++             "--out", str(out)],
++            capture_output=True, text=True, cwd=ROOT)
++        assert r.returncode == 0, r.stderr[-300:]
++        d = _json.loads(out.read_text())
++        assert "hla_over_base_ratio" in d and d["hla_over_base_ratio"] > 0
++        assert d["base"]["params"] == d["hla"]["params"]
+diff --git a/tests/test_eval.py b/tests/test_eval.py
+index 72c3d07..455f068 100644
+--- a/tests/test_eval.py
++++ b/tests/test_eval.py
+@@ -38,6 +38,7 @@ from src.eval import (  # noqa: E402
+     mechanism_gradient_statistics,
+     attention_head_similarity,
+     mechanism_knockout,
++    gate_redundancy_statistics,
+     prefix_matching_score,
+ )
+ from src.model import GPT, GPTConfig  # noqa: E402
+@@ -585,3 +586,60 @@ class TestRangeFlexConsistency:
+         out = perturbation_bounds(m)
+         assert out["L00_mix_k_max"] <= out["L00_theo_mix_k_max"] + 1e-4
+         assert out["L00_util_k_up"] > 0.99
++
++
++class TestGateRedundancy:
++    """Round 7: measurement-first answer to the 'four gates may collapse into
++    one function' attack (H3/M6) - probe, pre-registered merge rule, no aux loss."""
++
++    KW = dict(block_size=64, vocab_size=256, n_layer=2, n_head=2, n_embd=32,
++              gradient_checkpointing=False, use_rope=True, use_wpe=False,
++              use_laplace=True, laplace_alpha=1.0,
++              use_salience_bias=True, salience_alpha=1.0,
++              use_distance_laplace=True, distance_laplace_alpha=0.5)
++
++    def _model(self):
++        return GPT(GPTConfig(**self.KW))
++
++    def test_identity_reports_nan(self):
++        """All-zero gates have no correlation structure - NaN, not fake 0."""
++        import math
++        out = gate_redundancy_statistics(self._model())
++        assert math.isnan(out["gate_redundancy_mean_abs"])
++
++    def test_cloned_gates_detected(self):
++        """Ground-truth witness: gate_v cloned from gate_k must give corr ~ 1."""
++        m = self._model()
++        with torch.no_grad():
++            for blk in m.transformer.h:
++                blk.attn.W_gate_k.weight.normal_(0, 0.5)
++                blk.attn.W_gate_v.weight.copy_(blk.attn.W_gate_k.weight)
++                blk.attn.W_gate_sal.weight.normal_(0, 0.5)
++                blk.attn.W_gate_d.weight.normal_(0, 0.5)
++        out = gate_redundancy_statistics(m)
++        assert out["gate_corr_kv"] > 0.99
++        assert 0.0 <= out["gate_redundancy_mean_abs"] <= 1.0
++
++    def test_independent_gates_low_corr(self):
++        """Independent random gates must NOT be flagged as redundant."""
++        torch.manual_seed(11)
++        m = self._model()
++        with torch.no_grad():
++            for blk in m.transformer.h:
++                for lin in (blk.attn.W_gate_k, blk.attn.W_gate_v,
++                            blk.attn.W_gate_sal, blk.attn.W_gate_d):
++                    lin.weight.normal_(0, 0.5)
++        out = gate_redundancy_statistics(m)
++        assert out["gate_redundancy_mean_abs"] < 0.9
++
++    def test_state_restored_and_deterministic(self):
++        m = self._model().train()
++        with torch.no_grad():  # nonzero gates: NaN != NaN would defeat the equality check
++            for blk in m.transformer.h:
++                blk.attn.W_gate_k.weight.normal_(0, 0.3)
++                blk.attn.W_gate_v.weight.normal_(0, 0.3)
++        r1 = gate_redundancy_statistics(m, seed=5)
++        r2 = gate_redundancy_statistics(m, seed=5)
++        assert r1 == r2
++        assert m.training
++        assert m.transformer.h[0].attn.capture_diagnostics is False
