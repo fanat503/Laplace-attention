@@ -18,8 +18,6 @@ This repository contains:
 2. **A sterile comparison harness** — base and HLA train from the same initial weights on the same data in the same order;
 3. **Theory and diagnostics** — verified theorems ([`docs/THEORY.md`](docs/THEORY.md)), causal knockout probes, interference and spectral metrics ([`docs/METRICS.md`](docs/METRICS.md)).
 
-**Status**: infrastructure complete and tested. Earlier iterations showed a 0.09 validation loss gap at 100M — reproducing that inside the harness is the first experiment, not a claim.
-
 ## The idea in one formula
 
 ```
