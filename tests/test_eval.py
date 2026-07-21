@@ -39,6 +39,7 @@ from src.eval import (  # noqa: E402
     attention_head_similarity,
     mechanism_knockout,
     gate_redundancy_statistics,
+    positional_recall_curve,
     prefix_matching_score,
 )
 from src.model import GPT, GPTConfig  # noqa: E402
@@ -643,3 +644,41 @@ class TestGateRedundancy:
         assert r1 == r2
         assert m.training
         assert m.transformer.h[0].attn.capture_diagnostics is False
+
+
+class TestPositionalRecall:
+    """Round 10: direct LITM probe - the pre-registered H4 measurement."""
+
+    def test_keys_and_ranges(self):
+        c = GPTConfig(block_size=128, vocab_size=50257, n_layer=1, n_head=2,
+                      n_embd=32, gradient_checkpointing=False)
+        out = positional_recall_curve(GPT(c), batch_size=2)
+        for k in ("pos_10", "pos_30", "pos_50", "pos_70", "pos_90",
+                  "litm_middle_drop", "litm_worst_frac"):
+            assert k in out
+        for k in ("pos_10", "pos_30", "pos_50", "pos_70", "pos_90"):
+            assert 0.0 <= out[k] <= 1.0
+
+    def test_small_vocab_nan(self):
+        import math
+        c = GPTConfig(block_size=64, vocab_size=256, n_layer=1, n_head=2,
+                      n_embd=32, gradient_checkpointing=False)
+        out = positional_recall_curve(GPT(c))
+        assert math.isnan(out["litm_middle_drop"])
+
+    def test_deterministic_and_state_restored(self):
+        c = GPTConfig(block_size=128, vocab_size=50257, n_layer=1, n_head=2,
+                      n_embd=32, gradient_checkpointing=False)
+        m = GPT(c).train()
+        r1 = positional_recall_curve(m, seed=3, batch_size=2)
+        r2 = positional_recall_curve(m, seed=3, batch_size=2)
+        assert r1 == r2
+        assert m.training
+
+    def test_flat_at_random_init(self):
+        """An untrained model has no positional preference - the curve must be
+        ~flat (drop ~ 0). Ground-truth witness for the metric's zero point."""
+        c = GPTConfig(block_size=128, vocab_size=50257, n_layer=1, n_head=2,
+                      n_embd=32, gradient_checkpointing=False)
+        out = positional_recall_curve(GPT(c), batch_size=2)
+        assert abs(out["litm_middle_drop"]) < 1e-4

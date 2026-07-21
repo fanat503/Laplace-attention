@@ -226,6 +226,17 @@ an aux loss would change the objective (breaking the same-loss sterility
 invariant) and presume the answer. Ground-truth tested: cloned gates give
 corr = 1.0, independent random gates stay below 0.9.
 
+### `positional_recall_curve(model)`
+
+Direct Lost-in-the-Middle probe (Liu et al., 2023): a needle pair [A][B] is
+planted at depth fraction 10/30/50/70/90% of the context; the query [A] sits
+at the end; report P(B) per depth. Scalars: `litm_middle_drop`
+(mean-edge − worst-middle; 0 = flat, positive = the classic U-sag) and
+`litm_worst_frac` (worst-middle / best-edge; 1.0 = no sag). The pre-registered
+long-context reading: HLA's distance/salience mechanisms should FLATTEN this
+curve relative to the sterile base twin. NaN for vocabularies too small for
+the needle token block (deliberate, like the SVD metrics).
+
 ### `attention_head_similarity(model)`
 
 Mean pairwise Jensen–Shannon divergence between per-head attention
