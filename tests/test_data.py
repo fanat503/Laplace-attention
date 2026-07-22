@@ -130,3 +130,86 @@ class TestDataloader:
         first = next(iter(dl))["input_ids"]
         assert int(first[0, 0]) == 0
         assert int(first[1, 0]) == 10
+
+
+class TestTokenizerBackends:
+    """Round 11 (gigatoken): the fast backend is an OPTIMIZATION, never a
+    semantics change - datasets must be bit-identical across backends, and
+    a lying backend must be caught before/during the write."""
+
+    def _prep(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "prep_mod", os.path.join(ROOT, "scripts", "prepare_c4_data.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        if mod.tiktoken is None:
+            pytest.skip("tiktoken not installed (optional data-prep dependency)")
+        return mod
+
+    def _corpus(self, n=400):
+        import random, string
+        rng = random.Random(7)
+        words = ["".join(rng.choices(string.ascii_lowercase, k=rng.randint(2, 10)))
+                 for _ in range(2000)]
+        return [" ".join(rng.choices(words, k=rng.randint(10, 120))) + "." for _ in range(n)]
+
+    def test_batched_tiktoken_matches_legacy_fingerprint(self, tmp_path):
+        """The batched writer must produce the same stream as the old
+        per-document loop: verify against a manual reference encoding."""
+        prep = self._prep()
+        import tiktoken, hashlib
+        import numpy as np
+        corpus = self._corpus()
+        enc = tiktoken.get_encoding("gpt2")
+        ref_stream = []
+        for t in corpus:
+            toks = enc.encode_ordinary(t) + [enc.eot_token]
+            ref_stream.extend(toks)
+            if len(ref_stream) >= 30000:
+                break
+        ref = np.asarray(ref_stream[:30000], dtype=np.int32)
+        out = tmp_path / "t.bin"
+        prep.write_split(dataset_name="local", name=None, split="train",
+                         revision=None, text_field="text", tokenizer_name="gpt2",
+                         target_tokens=30000, out_path=str(out), add_eos=True,
+                         full_hash=False, backend="tiktoken", texts=list(corpus))
+        got = np.fromfile(out, dtype=np.int32)
+        assert np.array_equal(got, ref), "batched writer changed the token stream"
+
+    def test_backends_bit_identical(self, tmp_path):
+        import pytest as _pytest
+        prep = self._prep()
+        if prep._gigatoken is None:
+            _pytest.skip("gigatoken not installed")
+        import hashlib
+        corpus = self._corpus()
+        outs = {}
+        for backend in ("tiktoken", "gigatoken"):
+            out = tmp_path / f"{backend}.bin"
+            meta = prep.write_split(dataset_name="local", name=None, split="train",
+                                    revision=None, text_field="text",
+                                    tokenizer_name="gpt2", target_tokens=20000,
+                                    out_path=str(out), add_eos=True,
+                                    full_hash=False, backend=backend,
+                                    texts=list(corpus))
+            outs[backend] = (hashlib.sha256(out.read_bytes()).hexdigest(),
+                             meta["content_sha256_stream"], meta["tokenizer_backend"])
+        assert outs["tiktoken"][0] == outs["gigatoken"][0], "bin files differ across backends"
+        assert outs["tiktoken"][1] == outs["gigatoken"][1], "stream fingerprints differ"
+        assert outs["gigatoken"][2] == "gigatoken", "sidecar must record the backend"
+
+    def test_lying_backend_is_caught(self):
+        """The per-batch cross-check must abort on any token mismatch."""
+        prep = self._prep()
+        enc = prep.BatchEncoder("gpt2", "tiktoken")
+        enc.crosscheck = True
+        enc._enc_batch = lambda texts: [[1, 2, 3] for _ in texts]  # lying backend
+        import pytest as _pytest
+        with _pytest.raises(RuntimeError, match="TOKENIZER MISMATCH"):
+            enc.encode_batch(["hello world", "another document"])
+
+    def test_verify_backend_equivalence_gate(self):
+        prep = self._prep()
+        # tiktoken backend: no-op, must not raise
+        prep.verify_backend_equivalence("gpt2", "tiktoken")

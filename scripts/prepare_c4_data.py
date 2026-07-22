@@ -55,6 +55,14 @@ except ImportError as _e:  # pragma: no cover
 else:
     _IMPORT_ERROR = None
 
+# Optional fast backend (marcelroed/gigatoken): bit-identical GPT-2 tokens at
+# multi-x throughput. NEVER required - tiktoken remains the default and the
+# reference implementation.
+try:
+    import gigatoken as _gigatoken
+except ImportError:  # pragma: no cover
+    _gigatoken = None
+
 
 def require_data_deps() -> None:
     if _IMPORT_ERROR is not None:
@@ -98,6 +106,79 @@ def file_sha256(path: str, chunk_size: int = 64 * 1024 * 1024) -> str:
     return h.hexdigest()
 
 
+class BatchEncoder:
+    """Backend-agnostic batch encoder with a built-in sterility cross-check.
+
+    STERILITY DESIGN. The dataset fingerprint (sha256 over the emitted token
+    bytes, recorded in the sidecar) is the ground truth: two datasets are
+    interchangeable iff fingerprints match, REGARDLESS of which backend
+    produced them. tiktoken stays the reference; the gigatoken path is a
+    speed optimization that must be byte-equivalent - enforced two ways:
+      1) verified up front on this machine (see verify_backend_equivalence);
+      2) spot-checked DURING the run: one random document per batch is
+         re-encoded with tiktoken and must match exactly (cost ~1/batch).
+    Any mismatch aborts the run loudly - a wrong-token dataset must never
+    be written silently.
+    """
+
+    def __init__(self, tokenizer_name: str, backend: str, crosscheck: bool = True):
+        self.reference = tiktoken.get_encoding(tokenizer_name)
+        self.backend = backend
+        self.crosscheck = crosscheck and backend != "tiktoken"
+        self._rng = __import__("random").Random(0)
+        if backend == "tiktoken":
+            self._enc_batch = lambda texts: self.reference.encode_ordinary_batch(texts)
+        elif backend == "gigatoken":
+            if _gigatoken is None:
+                raise SystemExit("--tokenizer-backend gigatoken requires: pip install gigatoken")
+            if tokenizer_name != "gpt2":
+                raise SystemExit("gigatoken backend is only wired for the gpt2 encoding here")
+            gt_tok = _gigatoken.Tokenizer("openai-community/gpt2").as_tiktoken()
+            self._enc_batch = lambda texts: gt_tok.encode_ordinary_batch(texts)
+            self.backend_version = getattr(_gigatoken, "__version__", "unknown")
+        else:
+            raise SystemExit(f"unknown --tokenizer-backend {backend!r}")
+
+    def encode_batch(self, texts):
+        out = self._enc_batch(texts)
+        if self.crosscheck and texts:
+            i = self._rng.randrange(len(texts))
+            ref = self.reference.encode_ordinary(texts[i])
+            if list(out[i]) != list(ref):
+                raise RuntimeError(
+                    f"TOKENIZER MISMATCH ({self.backend} vs tiktoken) on document "
+                    f"sample: {list(out[i])[:8]}... != {ref[:8]}... - aborting, "
+                    "dataset would not be sterile. Re-run with --tokenizer-backend tiktoken."
+                )
+        return out
+
+
+def verify_backend_equivalence(tokenizer_name: str, backend: str) -> None:
+    """Up-front gate: the chosen backend must reproduce tiktoken bit-for-bit
+    on a diverse probe set BEFORE any tokens are written."""
+    if backend == "tiktoken":
+        return
+    enc = BatchEncoder(tokenizer_name, backend, crosscheck=False)
+    probes = [
+        "Hello world!",
+        "Числа и юникод: 3.14159, привет, 你好, éàü, emoji 🚀🔥",
+        "def f(x):\n    return x**2  # code",
+        " \n\t weird   whitespace \r\n mix ",
+        "a" * 5000,
+        "word " * 2000,
+        "<|endoftext|> literal special-token text",
+    ]
+    got = enc.encode_batch(probes)
+    for t, g in zip(probes, got):
+        ref = enc.reference.encode_ordinary(t)
+        if list(g) != list(ref):
+            raise SystemExit(
+                f"backend {backend!r} is NOT bit-identical to tiktoken on probe "
+                f"{t[:30]!r} - refusing to build a dataset with it."
+            )
+    print(f"[backend] {backend} verified bit-identical to tiktoken on {len(probes)} probes")
+
+
 def iter_texts(dataset_name: str, name: Optional[str], split: str, revision: Optional[str], text_field: str):
     ds = load_dataset(dataset_name, name, split=split, streaming=True, revision=revision)
     for ex in ds:
@@ -118,8 +199,11 @@ def write_split(
     out_path: str,
     add_eos: bool,
     full_hash: bool,
+    backend: str = "tiktoken",
+    texts=None,
 ) -> Dict[str, Any]:
-    enc = tiktoken.get_encoding(tokenizer_name)
+    encoder = BatchEncoder(tokenizer_name, backend)
+    enc = encoder.reference
     eos = enc.eot_token
     dtype = np.dtype("int32")
 
@@ -134,28 +218,45 @@ def write_split(
     stream_hash = hashlib.sha256()
     started = time.time()
 
+    # Batched encoding (order-preserving, hence fingerprint-preserving): the
+    # token STREAM is identical to the old per-document loop - documents are
+    # encoded independently in both cases and written in stream order. The
+    # batch size only affects throughput, never content.
+    BATCH_DOCS = 512
     pbar = tqdm(total=target_tokens, unit="tok", desc=f"{split} -> {Path(out_path).name}")
-    for text in iter_texts(dataset_name, name, split, revision, text_field):
-        toks = enc.encode_ordinary(text)
-        if add_eos:
-            toks.append(eos)
-        if not toks:
-            empty_docs += 1
-            continue
-        remaining = target_tokens - pos
-        if remaining <= 0:
+    text_iter = iter_texts(dataset_name, name, split, revision, text_field) if texts is None else iter(texts)
+    done = False
+    while not done:
+        batch = []
+        for text in text_iter:
+            batch.append(text)
+            if len(batch) >= BATCH_DOCS:
+                break
+        if not batch:
             break
-        if len(toks) > remaining:
-            toks = toks[:remaining]
-            truncated_last_doc = True
-        chunk = np.asarray(toks, dtype=dtype)
-        arr[pos : pos + len(chunk)] = chunk
-        stream_hash.update(chunk.tobytes())
-        pos += len(chunk)
-        docs += 1
-        pbar.update(len(chunk))
-        if pos >= target_tokens:
-            break
+        for toks in encoder.encode_batch(batch):
+            toks = list(toks)
+            if add_eos:
+                toks.append(eos)
+            if not toks:
+                empty_docs += 1
+                continue
+            remaining = target_tokens - pos
+            if remaining <= 0:
+                done = True
+                break
+            if len(toks) > remaining:
+                toks = toks[:remaining]
+                truncated_last_doc = True
+            chunk = np.asarray(toks, dtype=dtype)
+            arr[pos : pos + len(chunk)] = chunk
+            stream_hash.update(chunk.tobytes())
+            pos += len(chunk)
+            docs += 1
+            pbar.update(len(chunk))
+            if pos >= target_tokens:
+                done = True
+                break
     pbar.close()
     arr.flush()
     del arr
@@ -188,6 +289,7 @@ def write_split(
         "truncated_last_document": bool(truncated_last_doc),
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "elapsed_sec": float(time.time() - started),
+        "tokenizer_backend": backend,
         "content_sha256_stream": stream_hash.hexdigest(),
         "sample_fingerprint": sample_fingerprint(out_path, dtype=dtype, num_tokens=target_tokens),
         "file_size_bytes": int(os.path.getsize(out_path)),
@@ -214,6 +316,10 @@ def main() -> None:
     ap.add_argument("--val-out", default="val_fixed_tokens.bin")
     ap.add_argument("--no-eos", action="store_true")
     ap.add_argument("--full-hash", action="store_true", help="Compute full SHA256 of output files; slower")
+    ap.add_argument("--tokenizer-backend", default="tiktoken", choices=["tiktoken", "gigatoken"],
+                    help="gigatoken = multi-x faster, verified bit-identical to tiktoken "
+                         "up front AND spot-checked per batch; fingerprint in the sidecar "
+                         "is backend-independent ground truth")
     args = ap.parse_args()
     require_data_deps()
 
@@ -223,6 +329,7 @@ def main() -> None:
     train_path = str(out_dir / args.train_out)
     val_path = str(out_dir / args.val_out)
 
+    verify_backend_equivalence(args.tokenizer, args.tokenizer_backend)
     common = dict(
         dataset_name=args.dataset,
         name=args.name,
@@ -231,6 +338,7 @@ def main() -> None:
         tokenizer_name=args.tokenizer,
         add_eos=not args.no_eos,
         full_hash=args.full_hash,
+        backend=args.tokenizer_backend,
     )
     train_meta = write_split(split=args.train_split, target_tokens=args.train_tokens, out_path=train_path, **common)
     val_meta = write_split(split=args.val_split, target_tokens=args.val_tokens, out_path=val_path, **common)
