@@ -18,3 +18,17 @@
 ## Licensing
 - C4 is distributed under the terms documented by AllenAI/Google; users must
   obtain it from official sources.
+
+## Tokenizer backends
+
+The reference tokenizer is tiktoken's GPT-2 encoding (`encode_ordinary` +
+explicit EOS). An optional fast backend (`--tokenizer-backend gigatoken`,
+marcelroed/gigatoken) is supported for large preparations. Sterility contract:
+the sidecar's `content_sha256_stream` fingerprint is backend-independent
+ground truth - datasets are interchangeable iff fingerprints match. The
+gigatoken path is gated twice: verified bit-identical to tiktoken on a
+diverse probe set before any tokens are written, and spot-checked against
+tiktoken on one random document per 512-document batch during the run
+(any mismatch aborts loudly). The backend used is recorded in the sidecar
+(`tokenizer_backend`). Tests: `tests/test_data.py::TestTokenizerBackends`
+(cross-backend bit-identity + lying-backend abort).

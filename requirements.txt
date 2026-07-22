@@ -18,3 +18,5 @@ pyflakes>=3.2
 # datasets>=2.19
 # tiktoken>=0.6
 # tqdm>=4.66
+# gigatoken>=0.9   # OPTIONAL fast tokenizer backend (--tokenizer-backend gigatoken);
+#                  # verified bit-identical to tiktoken up front + per-batch spot-check
