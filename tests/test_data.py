@@ -213,3 +213,38 @@ class TestTokenizerBackends:
         prep = self._prep()
         # tiktoken backend: no-op, must not raise
         prep.verify_backend_equivalence("gpt2", "tiktoken")
+
+    def test_special_literal_hybrid_fallback(self, tmp_path):
+        """Round 12: documents containing the literal '<|endoftext|>' must be
+        encoded EXACTLY like the legacy tiktoken-only pipeline (as plain
+        text), on every backend. The gigatoken compat layer refuses such
+        documents, so the encoder must route them to reference tiktoken -
+        verified here against a manually built legacy stream."""
+        import pytest as _pytest
+        prep = self._prep()
+        import tiktoken
+        import numpy as np
+        enc = tiktoken.get_encoding("gpt2")
+        corpus = ["plain doc one.",
+                  "tricky <|endoftext|> in the middle",
+                  "<|endoftext|>", "x<|endoftext|>y",
+                  "double <|endoftext|><|endoftext|> hit",
+                  "plain doc two."]
+        legacy = []
+        for t in corpus:
+            legacy.extend(enc.encode_ordinary(t) + [enc.eot_token])
+        n = len(legacy)
+        ref = np.asarray(legacy, dtype=np.int32)
+        backends = ["tiktoken"] + (["gigatoken"] if prep._gigatoken is not None else [])
+        for backend in backends:
+            out = tmp_path / f"lit_{backend}.bin"
+            meta = prep.write_split(dataset_name="local", name=None, split="train",
+                                    revision=None, text_field="text",
+                                    tokenizer_name="gpt2", target_tokens=n,
+                                    out_path=str(out), add_eos=True,
+                                    full_hash=False, backend=backend,
+                                    texts=list(corpus))
+            got = np.fromfile(out, dtype=np.int32)
+            assert np.array_equal(got, ref), f"{backend}: literal handling diverged from legacy"
+            if backend == "gigatoken":
+                assert meta["special_literal_fallback_docs"] == 4

@@ -126,6 +126,7 @@ class BatchEncoder:
         self.backend = backend
         self.crosscheck = crosscheck and backend != "tiktoken"
         self._rng = __import__("random").Random(0)
+        self.literal_fallbacks = 0
         if backend == "tiktoken":
             self._enc_batch = lambda texts: self.reference.encode_ordinary_batch(texts)
         elif backend == "gigatoken":
@@ -139,7 +140,34 @@ class BatchEncoder:
         else:
             raise SystemExit(f"unknown --tokenizer-backend {backend!r}")
 
+    # GPT-2's special token literal. tiktoken's encode_ordinary treats it as
+    # PLAIN TEXT (the reference semantics, shared with nanoGPT-style pipelines
+    # and our own pre-gigatoken datasets); gigatoken's compat layer refuses to
+    # encode it as ordinary text (a defensible design, but different).
+    SPECIAL_LITERAL = "<|endoftext|>"
+
     def encode_batch(self, texts):
+        """Hybrid policy: fast backend for literal-free documents (~100% of
+        web text), REFERENCE tiktoken for the rare document containing the
+        special-token literal. Semantics are therefore identical to the
+        original tiktoken-only pipeline BY CONSTRUCTION - datasets produced
+        before and after the fast backend existed are bit-interchangeable.
+        Rejected alternatives, for the record: stripping the literal changes
+        the token stream even for the tiktoken path (silent format change);
+        mapping it to the real EOS id injects fake document boundaries."""
+        if self.backend != "tiktoken":
+            slow = [i for i, t in enumerate(texts) if self.SPECIAL_LITERAL in t]
+            if slow:
+                out = [None] * len(texts)
+                fast_idx = [i for i in range(len(texts)) if i not in set(slow)]
+                if fast_idx:
+                    fast = self._enc_batch([texts[i] for i in fast_idx])
+                    for i, toks in zip(fast_idx, fast):
+                        out[i] = list(toks)
+                for i in slow:
+                    out[i] = self.reference.encode_ordinary(texts[i])
+                self.literal_fallbacks += len(slow)
+                return out
         out = self._enc_batch(texts)
         if self.crosscheck and texts:
             i = self._rng.randrange(len(texts))
@@ -223,7 +251,11 @@ def write_split(
     # encoded independently in both cases and written in stream order. The
     # batch size only affects throughput, never content.
     BATCH_DOCS = 512
-    pbar = tqdm(total=target_tokens, unit="tok", desc=f"{split} -> {Path(out_path).name}")
+    pbar = tqdm(total=target_tokens, unit="tok", unit_scale=True,
+                desc=f"{split} -> {Path(out_path).name}",
+                mininterval=float(os.environ.get("PREP_LOG_INTERVAL_SEC", "100")),
+                maxinterval=float(os.environ.get("PREP_LOG_INTERVAL_SEC", "100")),
+                ascii=True)
     text_iter = iter_texts(dataset_name, name, split, revision, text_field) if texts is None else iter(texts)
     done = False
     while not done:
@@ -290,6 +322,7 @@ def write_split(
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "elapsed_sec": float(time.time() - started),
         "tokenizer_backend": backend,
+        "special_literal_fallback_docs": int(encoder.literal_fallbacks),
         "content_sha256_stream": stream_hash.hexdigest(),
         "sample_fingerprint": sample_fingerprint(out_path, dtype=dtype, num_tokens=target_tokens),
         "file_size_bytes": int(os.path.getsize(out_path)),
