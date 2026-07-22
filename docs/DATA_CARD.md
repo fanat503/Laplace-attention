@@ -32,3 +32,15 @@ tiktoken on one random document per 512-document batch during the run
 (any mismatch aborts loudly). The backend used is recorded in the sidecar
 (`tokenizer_backend`). Tests: `tests/test_data.py::TestTokenizerBackends`
 (cross-backend bit-identity + lying-backend abort).
+
+**Special-token literal policy.** Web text occasionally contains the literal
+string `<|endoftext|>`. Reference semantics (tiktoken `encode_ordinary`, same
+as nanoGPT-style pipelines and all datasets produced by earlier versions of
+this script): the literal is encoded as PLAIN TEXT. gigatoken's compat layer
+refuses to ordinary-encode special-token literals, so the batch encoder
+routes any document containing the literal to reference tiktoken (hybrid
+fallback; count recorded in the sidecar as `special_literal_fallback_docs`).
+Rejected alternatives: stripping the literal (silently changes the token
+stream even for the tiktoken path - a format change); mapping it to the real
+EOS id (injects fake document boundaries). Result: datasets are
+bit-identical across backends AND with the pre-gigatoken pipeline (tested).
