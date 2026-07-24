@@ -44,7 +44,7 @@ cd Laplace-attention
 pip install -r requirements.txt        # yoou can use CPU
 
 python -m pytest tests/ -q             # 272 passed
-python scripts/audit_sterility.py      # STERILITY AUDIT PASSED
+python scripts/audit_sterility.py      
 ```
 
 Train base/HLA pair (TPU/XLA; every step below also runs on CPU for smoke test):
