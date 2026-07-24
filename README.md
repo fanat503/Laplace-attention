@@ -50,38 +50,24 @@ python scripts/audit_sterility.py      # STERILITY AUDIT PASSED
 Train base/HLA pair (TPU/XLA; every step below also runs on CPU for smoke test):
 
 ```bash
-# 1 · Validate configs and then make init
+
 python scripts/validate_configs.py --base configs/200m_base_s42.json --hla configs/200m_hla_s42.json
 python src/make_init.py --shared-backbone \
     --base-config configs/200m_base_s42.json --hla-config configs/200m_hla_s42.json \
     --out-base inits/init_200m_base_s42.pt --out-hla inits/init_200m_hla_s42.pt
 
-# 2 · Tokenize
 python scripts/prepare_c4_data.py --train-tokens 5400000000 --val-tokens 20000000 --out-dir data
 
-# 3 · Train both
 python src/train_xla.py --config configs/200m_base_s42.json
 python src/train_xla.py --config configs/200m_hla_s42.json
 
-# 4 · Ablation matrix
 python scripts/make_ablation_configs.py \
     --base configs/200m_base_v2_s42.json --hla configs/200m_hla_v2_s42.json \
     --outdir configs/ablations_200m --seeds 42 43 44
 ```
 
-Recommended ladder before any long run: smoke (10 steps), then pilot (1000 steps) and then full runs. We wrote our experimental design on [`docs/EXPERIMENT_CARD.md`](docs/EXPERIMENT_CARD.md).
+We wrote our experimental design on [`docs/EXPERIMENT_CARD.md`](docs/EXPERIMENT_CARD.md).
 
-## Why trust the comparison
-
-The methodology is designed so that cheating is hard — 272 tests ([protocol & threat model](docs/STERILITY.md)):
-
-- Same start — shared backbone weights;
-- Same size — every mechanism module exists in the base too (α = 0, frozen);
-- Same data — fixed-token pipeline;
-- Same knobs — config validator rejects any difference.
-
-
-Training logs record interference metrics, distractor induction margins, etc. Crucially, the figures presented in this paper are generated directly from these raw CSV logs rather than via post-hoc analysis. 
 
 ## Repository layout
 
@@ -93,8 +79,6 @@ Training logs record interference metrics, distractor induction margins, etc. Cr
 ├── docs/         Theory, metrics, etc.
 └── tests/        272 tests
 ```
-
-CI runs the full suite plus three audits on every push.
 
 ## Citation
 
