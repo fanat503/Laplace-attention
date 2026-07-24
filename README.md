@@ -10,28 +10,28 @@
 
 </div>
 
-Every attention head does two interconnected jobs with one set of vectors: retrieval (which tokens matter) and transmission (what they say). Because both share the residual stream, they interfere. HLA gives each job its own channel.
+Every attention head does two jobs with one set of vectors: retrieval (which tokens matter) and transmission (what they say). They interfere. HLA gives each job its own channel.
 
 This repository contains:
 
-1. **The mechanism** — one modified attention equation ([`src/model.py`](src/model.py), single file);
-2. **A sterile comparison harness** — base and HLA train from the same initial weights on the same data in the same order;
-3. **Theory and diagnostics** — verified theorems ([`docs/THEORY.md`](docs/THEORY.md)), causal knockout probes, interference and spectral metrics ([`docs/METRICS.md`](docs/METRICS.md)).
+1. The mechanism — one modified attention equation ([`src/model.py`](src/model.py), single file);
+2. A sterile comparison harness — base and HLA train from the same initial weights on the same data in the same order;
+3. Theory and diagnostics — verified theorems ([`docs/THEORY.md`](docs/THEORY.md)), interference and metrics ([`docs/METRICS.md`](docs/METRICS.md)).
 
-## The idea in one formula
+## The idea
 
 ```
 score_ij = ( τ_i · R(θ_i)·q_i ) · ( m_j · R(φ_j)·k_j ) / √d  +  B_ij
 out_i    = Σ_{j≤i} softmax_j(score_ij) · ( u_j · v_j )
 ```
 
-Phase carries *where to look*; magnitude carries *what is said* — like a hologram.
+Phase carries where to look; magnitude carries what is said.
 
 | Component | Role | At init |
 |---|---|---|
-| `R(θ_i)`, `R(φ_j)` | content-conditioned rotation of Q, K — learned matching geometry, composes with RoPE | `I` |
-| `m_j`, `u_j` | multiplicative K, V gates| `1` |
-| `B_ij` | additive biases: salience  + content-conditioned distance decay + FoX-style gate (baseline) | `0` |
+| `R(θ_i)`, `R(φ_j)` | content-conditioned rotation of Q, K | `I` |
+| `m_j`, `u_j` | K, V gates| `1` |
+| `B_ij` | additive biases: salience  + content-conditioned distance decay + FoX gate (baseline) | `0` |
 | `τ_i` | per-query softmax temperature | `1` |
 
 Full derivation: [`docs/THEORY.md`](docs/THEORY.md).
@@ -47,7 +47,7 @@ python -m pytest tests/ -q             # 272 passed
 python scripts/audit_sterility.py      # STERILITY AUDIT PASSED
 ```
 
-Train a sterile base/HLA pair (TPU/XLA; every step below also runs on CPU for smoke test):
+Train base/HLA pair (TPU/XLA; every step below also runs on CPU for smoke test):
 
 ```bash
 # 1 · Validate configs and then make init
@@ -76,12 +76,12 @@ Recommended ladder before any long run: smoke (10 steps), then pilot (1000 steps
 The methodology is designed so that cheating is hard — 272 tests ([protocol & threat model](docs/STERILITY.md)):
 
 - Same start — shared backbone weights;
-- Same size — every mechanism module exists in the base too (α = 0, frozen, counted);
-- Same data — deterministic fixed-token pipeline;
-- Same knobs — config validator rejects any difference;
-- Measured honestly — parameter-matched and FLOPs-matched pairs; mechanism compute overhead ~7% at 200M.
+- Same size — every mechanism module exists in the base too (α = 0, frozen);
+- Same data — fixed-token pipeline;
+- Same knobs — config validator rejects any difference.
 
-Training logs record interference metrics, distractor induction margins, etc. Crucially, the figures presented in this paper are generated directly from these raw CSV logs rather than via post-hoc analysis. Checkpoint level causal probes, including mechanism knockouts and prefix matching scores, are documented in [`src/eval.py`](src/eval.py).
+
+Training logs record interference metrics, distractor induction margins, etc. Crucially, the figures presented in this paper are generated directly from these raw CSV logs rather than via post-hoc analysis. 
 
 ## Repository layout
 
