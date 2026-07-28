@@ -772,3 +772,40 @@ class TestRound8Tooling:
         d = _json.loads(out.read_text())
         assert "hla_over_base_ratio" in d and d["hla_over_base_ratio"] > 0
         assert d["base"]["params"] == d["hla"]["params"]
+
+
+class TestIsoFlopsPairs:
+    """Round 13: both comparison axes must stay internally consistent."""
+
+    RATIO = 1.0693  # profile_flops, v2 recipe @ 2048
+
+    def _steps(self, name):
+        cfg = json.load(open(os.path.join(ROOT, "configs", name)))
+        return int(cfg["max_steps"])
+
+    def test_kaggle_iso_flops_pair_matched(self):
+        base = self._steps("200m_base_v2_s42.json")
+        hla = self._steps("200m_hla_v2_flops_s42.json")
+        assert hla < base, "iso-FLOPs on Kaggle must be hla-shorter"
+        mismatch = abs(hla * self.RATIO - base) / base
+        assert mismatch < 0.001, f"FLOPs mismatch {mismatch:.4%} exceeds 0.1%"
+
+    def test_tpu_base_longer_pair_matched(self):
+        base = self._steps("tpu3_200m_base_v2_flopslong_s42.json")
+        hla = self._steps("tpu3_200m_hla_v2_s42.json")
+        assert base > hla, "TPU iso-FLOPs must be base-longer (strongest control)"
+        mismatch = abs(hla * self.RATIO - base) / base
+        assert mismatch < 0.001, f"FLOPs mismatch {mismatch:.4%} exceeds 0.1%"
+
+    def test_kaggle_200m_fits_dataset(self):
+        """17900 steps x 262144 tok/step must fit the 4.7B-token dataset."""
+        for name in ("200m_base_s42.json", "200m_hla_s42.json",
+                     "200m_base_v2_s42.json", "200m_hla_v2_s42.json"):
+            cfg = json.load(open(os.path.join(ROOT, "configs", name)))
+            tokens = cfg["max_steps"] * cfg["batch_size_per_device"] * cfg["grad_accum"] * 8 * 2048
+            assert tokens <= 4_700_000_000, f"{name}: needs {tokens/1e9:.2f}B > 4.7B dataset"
+
+    def test_experiment_card_documents_axes(self):
+        card = open(os.path.join(ROOT, "docs", "EXPERIMENT_CARD.md"), encoding="utf-8").read()
+        assert "Two comparison axes" in card
+        assert "base-longer" in card

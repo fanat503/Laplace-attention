@@ -243,3 +243,15 @@ Mean pairwise Jensen–Shannon divergence between per-head attention
 distributions at matched positions (bounded by ln 2). Low JS = redundant
 heads attending alike; rising JS in the HLA run = heads differentiating —
 the attention-space counterpart of the weight-space interference metrics (§5).
+
+### `scripts/causal_patch.py` (checkpoint-time, the H5 experiment)
+
+Builds a franken model: HLA's trained RETRIEVAL side (Q/K projection rows,
+phases, K-gate, salience/distance/forget biases, q-temp) spliced onto base's
+trained TRANSMISSION side (V rows, output proj, MLPs, embeddings), then runs
+the retrieval probes on base / hla / franken. Gap closure fraction
+(franken-base)/(hla-base) is the pre-registered H5 statistic: >50% = the
+retrieval geometry causally carries the gain; <20% = mechanistic story
+revised. Transplant sets: qk | phase | retrieval | full (full == HLA exactly;
+tested). W_layer_temp is deliberately not transplanted (mixed K/V allegiance
+- documented limitation).

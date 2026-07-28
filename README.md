@@ -27,7 +27,7 @@ git clone https://github.com/fanat503/Laplace-attention.git
 cd Laplace-attention
 pip install -r requirements.txt        # yoou can use CPU
 
-python -m pytest tests/ -q             # 272 passed
+python -m pytest tests/ -q             # 283 passed
 python scripts/audit_sterility.py      
 ```
 
@@ -61,7 +61,7 @@ We wrote our experimental design on [`docs/EXPERIMENT_CARD.md`](docs/EXPERIMENT_
 ├── configs/      20 paired base/HLA JSONs, FLOPs-matched
 ├── scripts/      Validation, experiment, analysis
 ├── docs/         Theory, metrics, etc.
-└── tests/        272 tests
+└── tests/        283 tests
 ```
 
 ## Citation
