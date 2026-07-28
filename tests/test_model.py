@@ -847,8 +847,18 @@ class TestDiagnosticsGating:
         model(x, x)
         assert model.transformer.h[0].attn.last_entropy is None
 
-    def test_entropy_computed_in_eval(self):
+    def test_entropy_not_computed_in_plain_eval(self):
+        """Round 14: plain eval (validation!) must NOT pay the (B,H,T,T)
+        fp32 entropy cost - it OOMed v3-8 at 2048 context. Probes opt in
+        via set_diagnostics."""
         model = GPT(small_cfg(**HLA_KW)).eval()
+        x = torch.randint(0, 256, (1, 16))
+        model(x)
+        assert model.transformer.h[0].attn.last_entropy is None
+
+    def test_entropy_computed_in_eval_with_diagnostics(self):
+        model = GPT(small_cfg(**HLA_KW)).eval()
+        model.set_diagnostics(enabled=True)
         x = torch.randint(0, 256, (1, 16))
         model(x)
         e = model.transformer.h[0].attn.last_entropy
@@ -1065,3 +1075,36 @@ class TestRangeFlex:
             small_cfg(range_flex=0.0)
         with _pt.raises(ValueError):
             small_cfg(range_flex=1.5)
+
+
+class TestGetattrDefaultsSync:
+    """Round 16 (the user asked: check what you asked me to check):
+    every getattr(config, name, default) in model.py must default to the SAME
+    value as GPTConfig - a mismatch is a dormant double-truth that silently
+    activates if the model is ever built from a legacy dict/namespace.
+    Found live: use_laplace False-vs-True, laplace_alpha 1.0-vs-0.0,
+    laplace_range_v 0.25-vs-0.2, beta_v 0.3-vs-0.25."""
+
+    def test_all_getattr_defaults_match_gptconfig(self):
+        import re, dataclasses
+        from src.model import GPTConfig
+        src = open(os.path.join(ROOT, "src", "model.py"), encoding="utf-8").read()
+        cfg = {f.name: f.default for f in dataclasses.fields(GPTConfig)}
+        bad = []
+        for m in re.finditer(r'getattr\(config,\s*"(\w+)",\s*([^)]+)\)', src):
+            name, default_str = m.group(1), m.group(2).strip()
+            if name not in cfg:
+                bad.append((name, default_str, "missing from GPTConfig"))
+                continue
+            inner = re.sub(r'^(float|bool|int|str)\(', '', default_str).rstrip(')')
+            try:
+                val = eval(inner, {}, {})
+            except Exception:
+                continue
+            expected = cfg[name]
+            same = (abs(float(val) - float(expected)) < 1e-12
+                    if isinstance(expected, float) or isinstance(val, float)
+                    else val == expected)
+            if not same:
+                bad.append((name, val, expected))
+        assert not bad, f"getattr defaults out of sync with GPTConfig: {bad}"

@@ -682,3 +682,66 @@ class TestPositionalRecall:
                       n_embd=32, gradient_checkpointing=False)
         out = positional_recall_curve(GPT(c), batch_size=2)
         assert abs(out["litm_middle_drop"]) < 1e-4
+
+
+class TestCausalPatch:
+    """Round 14: the Oral experiment's tooling - transplant correctness."""
+
+    KW = dict(block_size=64, vocab_size=50257, n_layer=2, n_head=2, n_embd=32,
+              gradient_checkpointing=False, use_rope=True, use_wpe=False,
+              phase_mult=0.15, use_laplace=True, laplace_alpha=1.0,
+              use_salience_bias=True, salience_alpha=1.0,
+              use_distance_laplace=True, distance_laplace_alpha=0.5)
+
+    def _pair(self):
+        import importlib, sys as _sys
+        _sys.path.insert(0, os.path.join(ROOT, "scripts"))
+        cp = importlib.import_module("causal_patch")
+        torch.manual_seed(0)
+        hla = GPT(GPTConfig(**self.KW))
+        base = GPT(GPTConfig(**self.KW))
+        base.load_state_dict(hla.state_dict())
+        with torch.no_grad():  # раздвигаем близнецов детерминированно
+            for blk in hla.transformer.h:
+                blk.attn.W_phase_q.normal_(0, 0.2, generator=torch.Generator().manual_seed(1))
+                blk.attn.W_gate_k.weight.normal_(0, 0.2, generator=torch.Generator().manual_seed(2))
+            for blk in base.transformer.h:
+                blk.attn.c_attn.weight.add_(0.01)
+        return cp, base.state_dict(), hla.state_dict()
+
+    def test_full_transplant_equals_hla(self):
+        cp, bs, hs = self._pair()
+        fr = cp.build_franken(bs, hs, 32, "full")
+        assert all(torch.equal(fr[k], hs[k]) for k in hs)
+
+    def test_qk_rows_spliced_v_rows_kept(self):
+        cp, bs, hs = self._pair()
+        fr = cp.build_franken(bs, hs, 32, "qk")
+        key = next(k for k in hs if "c_attn.weight" in k)
+        assert torch.equal(fr[key][:64], hs[key][:64])   # Q,K <- HLA
+        assert torch.equal(fr[key][64:], bs[key][64:])   # V  <- base
+
+    def test_retrieval_transplant_boundaries(self):
+        """Retrieval mechanisms come from HLA; the V-side gate must stay base
+        - the whole point is that transmission remains untouched."""
+        cp, bs, hs = self._pair()
+        fr = cp.build_franken(bs, hs, 32, "retrieval")
+        kq = next(k for k in hs if "W_phase_q" in k)
+        kv = next(k for k in hs if "W_gate_v.weight" in k)
+        km = next(k for k in hs if "mlp" in k and "weight" in k)
+        assert torch.equal(fr[kq], hs[kq])
+        assert torch.equal(fr[kv], bs[kv])
+        assert torch.equal(fr[km], bs[km])
+
+    def test_franken_state_loads_strict(self):
+        cp, bs, hs = self._pair()
+        fr = cp.build_franken(bs, hs, 32, "retrieval")
+        m = GPT(GPTConfig(**self.KW))
+        m.load_state_dict(fr, strict=True)  # raises on any mismatch
+
+    def test_mismatched_pair_rejected(self):
+        import pytest as _pytest
+        cp, bs, hs = self._pair()
+        bad = dict(bs); bad.pop(next(iter(bad)))
+        with _pytest.raises(ValueError, match="not a sterile pair"):
+            cp.build_franken(bad, hs, 32, "qk")

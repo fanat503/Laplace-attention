@@ -196,12 +196,12 @@ class CausalSelfAttention(nn.Module):
         # with all knobs on: pi*phase_mult*2(head)*2(layer) = 0.6*pi at 0.15.
         self.layer_dependent_phase = bool(getattr(config, "layer_dependent_phase", False))
 
-        self.use_laplace = getattr(config, "use_laplace", False)
-        self.laplace_alpha = getattr(config, "laplace_alpha", 1.0)
+        self.use_laplace = getattr(config, "use_laplace", True)
+        self.laplace_alpha = getattr(config, "laplace_alpha", 0.0)
         self.laplace_range_k = getattr(config, "laplace_range_k", 0.35)
-        self.laplace_range_v = getattr(config, "laplace_range_v", 0.25)
+        self.laplace_range_v = getattr(config, "laplace_range_v", 0.2)
         self.beta_k = getattr(config, "beta_k", 0.50)
-        self.beta_v = getattr(config, "beta_v", 0.30)
+        self.beta_v = getattr(config, "beta_v", 0.25)
 
         self.W_range_k = nn.Parameter(torch.zeros(self.n_head))
         self.W_range_v = nn.Parameter(torch.zeros(self.n_head))
@@ -667,7 +667,13 @@ class CausalSelfAttention(nn.Module):
         # forward wastes O(B*H*T^2) work per layer and adds host-sync pressure
         # on XLA. Gate it behind eval/diagnostics; measure_attention_entropy()
         # runs in eval mode, so it still works unchanged.
-        if (not self.training) or self.capture_diagnostics:
+        # Round 14 review find: this used to run on EVERY eval forward
+        # ((not self.training) or ...), i.e. on all 50 validation batches per
+        # eval - materializing p.float() + p.log() over (B,H,T,T) adds
+        # ~9-13 GB peak at B=16,H=16,T=2048: a real OOM risk on v3-8's
+        # 16 GB/core. Entropy is a PROBE - probes opt in via
+        # set_diagnostics(True) (all eval.py probes already do).
+        if self.capture_diagnostics:
             with torch.no_grad():
                 p = att.detach().float().clamp(min=1e-9)
                 entropy = -(p * p.log()).sum(dim=-1).mean(dim=(0, 2))  # (H,)

@@ -24,6 +24,15 @@ H4: the positional recall curve (positional_recall_curve probe) is FLATTER
     litm_worst_frac closer to 1) - the Lost-in-the-Middle reading of the
     distance/salience mechanisms. Pre-registered BEFORE any run has ever
     produced this curve.
+H5 (CAUSAL, the Oral experiment): transplanting the trained HLA retrieval
+    side into the trained base twin (scripts/causal_patch.py, transplant=
+    retrieval: Q/K rows + phase + K-gate + score biases + q-temp; V-side and
+    MLPs stay base) recovers a majority of the HLA-over-base gap on retrieval
+    probes (induction, distractor_margin). Decision rule: franken closes
+    >50% of the gap => the retrieval-geometry mechanism CAUSES the gain;
+    <20% => the gain lives in the transmission path and the mechanistic
+    narrative must be revised (reported either way). Ladder position: run
+    immediately after the first trained 200M pair.
 
 ## Active mechanism sets per config (B6: capacity vs default)
 
@@ -39,6 +48,24 @@ headline number used everything at once.
 | Ablation matrix arms | exactly one mechanism per single-factor arm | everything else |
 | `forget` arm | forget only (FoX baseline) | all HLA mechanisms |
 | `qtemp` arm | qtemp only | all others |
+
+## Two comparison axes (pre-registered; both reported)
+
+| Axis | Pair | Question it answers | Status |
+|---|---|---|---|
+| **Token-matched (PRIMARY for attribution)** | base@17900 vs hla@17900 (Kaggle); base@20000 vs hla@20000 (TPU) | "Is the gain caused by the mechanisms?" - everything except mechanisms is identical (same tokens, same order, same init) | primary |
+| **Iso-FLOPs (PRIMARY for efficiency)** | Kaggle: base@17900 vs hla@16740 (compute matched to 0.006%); TPU strongest control: base@21386 vs hla@20000 (base-longer: base receives HLA's +6.93% compute as extra steps) | "Does HLA beat a base given equal compute?" | secondary |
+
+Neither axis alone survives review: token-matched leaves the equal-compute
+question open; iso-FLOPs pairs see different data, so attribution is
+confounded by construction. The TPU base-longer run additionally yields a
+3-point base compute curve (17900-eq / 20000 / 21386) against hla@20000 -
+a mini Accuracy-vs-Compute figure.
+
+Dataset-size note (pre-registered): the Kaggle working-dir limit (19.5 GB)
+caps the Kaggle dataset at 4.7B stored tokens => 200M Kaggle runs use
+max_steps 17900 (4.69B tokens). The month-TPU dataset (28B+) removes this
+cap; TPU 200M runs use the original 20000 steps. Both are reported as-is.
 
 ## Pre-registered decision rules for architecture simplification
 

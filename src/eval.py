@@ -81,7 +81,13 @@ def measure_attention_entropy(model, device, seed: int = 42, batch_size: int = 4
         g = torch.Generator(device="cpu")
         g.manual_seed(seed)
         tokens = torch.randint(0, model.config.vocab_size, (batch_size, T), generator=g).to(device)
-        _ = model(tokens)
+        prev_diag = bool(model.transformer.h[0].attn.capture_diagnostics)
+        prev_attn = bool(model.transformer.h[0].attn.capture_attention)
+        model.set_diagnostics(enabled=True)
+        try:
+            _ = model(tokens)
+        finally:
+            model.set_diagnostics(enabled=prev_diag, capture_attention=prev_attn)
         entropies = []
         for block in model.transformer.h:
             e = getattr(block.attn, "last_entropy", None)
