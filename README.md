@@ -10,31 +10,15 @@
 
 </div>
 
-Every attention head does two jobs with one set of vectors: retrieval (which tokens matter) and transmission (what they say). They interfere. HLA gives each job its own channel.
+Every attention head does two jobs with one set of vectors: retrieval and transmission. They interfere. HLA gives each job its own channel.
 
 This repository contains:
 
 1. The mechanism — one modified attention equation ([`src/model.py`](src/model.py), single file);
-2. A sterile comparison harness — base and HLA train from the same initial weights on the same data in the same order;
-3. Theory and diagnostics — verified theorems ([`docs/THEORY.md`](docs/THEORY.md)), interference and metrics ([`docs/METRICS.md`](docs/METRICS.md)).
+2. A sterile comparison;
+3. Theory ([`docs/THEORY.md`](docs/THEORY.md)) and metrics ([`docs/METRICS.md`](docs/METRICS.md)).
 
-## The idea
 
-```
-score_ij = ( τ_i · R(θ_i)·q_i ) · ( m_j · R(φ_j)·k_j ) / √d  +  B_ij
-out_i    = Σ_{j≤i} softmax_j(score_ij) · ( u_j · v_j )
-```
-
-Phase carries where to look; magnitude carries what is said.
-
-| Component | Role | At init |
-|---|---|---|
-| `R(θ_i)`, `R(φ_j)` | content-conditioned rotation of Q, K | `I` |
-| `m_j`, `u_j` | K, V gates| `1` |
-| `B_ij` | additive biases: salience  + content-conditioned distance decay + FoX gate (baseline) | `0` |
-| `τ_i` | per-query softmax temperature | `1` |
-
-Full derivation: [`docs/THEORY.md`](docs/THEORY.md).
 
 ## Getting started
 
