@@ -62,6 +62,6 @@ We wrote our experimental design on [`docs/EXPERIMENT_CARD.md`](docs/EXPERIMENT_
 
 ## Citation
 
-If you use this code, please cite it via [`CITATION.cff`](CITATION.cff) (GitHub's "Cite this repository" button).
+If you use this code, please cite it via [`CITATION.cff`](CITATION.cff).
 
 **Apache-2.0** · Independent research; contributions, replications, and compute support welcome — open an issue.
