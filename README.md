@@ -1,12 +1,8 @@
 <div align="center">
 
-# HLA · Holographic Laplace Attention
+# HLA: Holographic Laplace Attention
 
-**Separating finding tokens from transmitting them in softmax attention**
-
-[![tests](https://github.com/fanat503/Laplace-attention/actions/workflows/tests.yml/badge.svg)](https://github.com/fanat503/Laplace-attention/actions/workflows/tests.yml)
-[![Theory](https://img.shields.io/badge/theory-9%20verified%20theorems-blue)](docs/THEORY.md)
-[![License](https://img.shields.io/badge/license-Apache--2.0-lightgrey)](LICENSE)
+Separating finding tokens from transmitting them in attention
 
 </div>
 
@@ -14,7 +10,7 @@ Every attention head does two jobs with one set of vectors: retrieval and transm
 
 This repository contains:
 
-1. The mechanism — one modified attention equation ([`src/model.py`](src/model.py), single file);
+1. The mechanism (one modified attention equation) ([`src/model.py`](src/model.py), single file);
 2. A sterile comparison;
 3. Theory ([`docs/THEORY.md`](docs/THEORY.md)) and metrics ([`docs/METRICS.md`](docs/METRICS.md)).
 
