@@ -1,0 +1,776 @@
+diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
+index 74f4c8b..f095a2e 100644
+--- a/CONTRIBUTING.md
++++ b/CONTRIBUTING.md
+@@ -2,7 +2,7 @@
+ 
+ ## Ground rules (they exist for scientific validity, not bureaucracy)
+ 
+-1. **No commit without green tests.** `python -m pytest tests/ -q -W error::UserWarning` must print `272 passed` (or more) before any push. CI enforces this, but run locally first.
++1. **No commit without green tests.** `python -m pytest tests/ -q -W error::UserWarning` must print `283 passed` (or more) before any push. CI enforces this, but run locally first.
+ 2. **Sterility is inviolable.** Any change touching `src/model.py`, `src/make_init.py`, config pairs, or the sampler must keep the identity/parameter-matching/data-order invariants (see `docs/STERILITY.md`). The relevant tests (`test_theory.py::TestTheorem1Identity`, `TestSterility`, `test_make_init.py`) are the gate.
+ 3. **New mechanisms follow the pattern**: identity-initialized (zero params ⇒ exact no-op, add to `reset_hla_identity` + `hla_identity_error` + `HLA_KEY_PATTERNS` + `HLA_NODECAY_MARKERS`), always-created for parameter matching, alpha-gated, clamped, with saturation diagnostics, an SDPA guard if it biases scores, and tests for identity/causality/gradient-flow/clip.
+ 4. **Configs change via the validators.** `validate_configs.py` (pair discipline) and `audit_config_values.py` (numeric sanity) must pass; new allowed diffs require justification in the PR description.
+diff --git a/README.md b/README.md
+index 7e39214..a58c2ea 100644
+--- a/README.md
++++ b/README.md
+@@ -43,7 +43,7 @@ git clone https://github.com/fanat503/Laplace-attention.git
+ cd Laplace-attention
+ pip install -r requirements.txt        # yoou can use CPU
+ 
+-python -m pytest tests/ -q             # 272 passed
++python -m pytest tests/ -q             # 283 passed
+ python scripts/audit_sterility.py      
+ ```
+ 
+@@ -77,7 +77,7 @@ We wrote our experimental design on [`docs/EXPERIMENT_CARD.md`](docs/EXPERIMENT_
+ ├── configs/      20 paired base/HLA JSONs, FLOPs-matched
+ ├── scripts/      Validation, experiment, analysis
+ ├── docs/         Theory, metrics, etc.
+-└── tests/        272 tests
++└── tests/        283 tests
+ ```
+ 
+ ## Citation
+diff --git a/configs/200m_base_s42.json b/configs/200m_base_s42.json
+index 0f24224..4d59165 100644
+--- a/configs/200m_base_s42.json
++++ b/configs/200m_base_s42.json
+@@ -1,10 +1,10 @@
+ {
+-  "_doc": "Base GPT for matched experiments with HLA. 200M params (12L x 1024d x 16H), 5.2B tokens (20000 steps x 128 effective batch x 2048 seq), ~7h on Kaggle TPU v5e-8. HLA components OFF for clean baseline. For HLA version: phase_mult=0.15, use_laplace=true, laplace_alpha=1.0, use_distance_laplace=true, distance_laplace_alpha=0.5. Otherwise IDENTICAL for matched comparison. [FIX: n_head 12->16, 1024 not divisible by 12]",
++  "_doc": "Base GPT for matched experiments with HLA. 200M params (12L x 1024d x 16H), 5.2B tokens (20000 steps x 128 effective batch x 2048 seq), ~7h on Kaggle TPU v5e-8. HLA components OFF for clean baseline. For HLA version: phase_mult=0.15, use_laplace=true, laplace_alpha=1.0, use_distance_laplace=true, distance_laplace_alpha=0.5. Otherwise IDENTICAL for matched comparison. [FIX: n_head 12->16, 1024 not divisible by 12] [17900 steps = 4.69B tokens: fits the 4.7B Kaggle dataset (platform limit 19.5GB working). Pre-registered dataset-size note in EXPERIMENT_CARD.]",
+   "seed": 42,
+   "save_dir": "/kaggle/working/runs/200m_base_s42",
+   "run_name": "200m_base_s42",
+-  "train_path": "/kaggle/input/tokens/train.bin",
+-  "val_path": "/kaggle/input/tokens/val.bin",
++  "train_path": "/kaggle/input/hla-c4-tokens/train_fixed_tokens.bin",
++  "val_path": "/kaggle/input/hla-c4-tokens/val_fixed_tokens.bin",
+   "init_ckpt": "/kaggle/working/inits/init_200m_base_s42.pt",
+   "init_strict": true,
+   "check_init_hla_identity": true,
+@@ -14,8 +14,8 @@
+   "grad_accum": 1,
+   "num_workers": 0,
+   "dataloader_prefetch_factor": 4,
+-  "max_steps": 20000,
+-  "warmup": 1000,
++  "max_steps": 17900,
++  "warmup": 900,
+   "grad_clip": 1.0,
+   "lr": 0.0006,
+   "min_lr": 6e-05,
+diff --git a/configs/200m_base_v2_s42.json b/configs/200m_base_v2_s42.json
+index bcb62ca..1d10cfe 100644
+--- a/configs/200m_base_v2_s42.json
++++ b/configs/200m_base_v2_s42.json
+@@ -1,10 +1,10 @@
+ {
+-  "_doc": "V2 recipe: stronger gate envelope (K mix in [0.56,2.20], V in [0.77,1.43]) + additive per-key salience bias (+-2 nats, weight x0.135..x7.4, no multiplicative floor). Motivation: v1 multiplicative floor (1-beta) capped suppression at x0.73 score scale; salience bias enables true strong suppression/boost of distant tokens. All HLA alphas = 0 (parameter-matched ablated base).",
++  "_doc": "V2 recipe: stronger gate envelope (K mix in [0.56,2.20], V in [0.77,1.43]) + additive per-key salience bias (+-2 nats, weight x0.135..x7.4, no multiplicative floor). Motivation: v1 multiplicative floor (1-beta) capped suppression at x0.73 score scale; salience bias enables true strong suppression/boost of distant tokens. All HLA alphas = 0 (parameter-matched ablated base). [17900 steps = 4.69B tokens: fits the 4.7B Kaggle dataset (platform limit 19.5GB working). Pre-registered dataset-size note in EXPERIMENT_CARD.]",
+   "seed": 42,
+   "save_dir": "/kaggle/working/runs/200m_base_v2_s42",
+   "run_name": "200m_base_v2_s42",
+-  "train_path": "/kaggle/input/tokens/train.bin",
+-  "val_path": "/kaggle/input/tokens/val.bin",
++  "train_path": "/kaggle/input/hla-c4-tokens/train_fixed_tokens.bin",
++  "val_path": "/kaggle/input/hla-c4-tokens/val_fixed_tokens.bin",
+   "init_ckpt": "/kaggle/working/inits/init_200m_base_v2_s42.pt",
+   "init_strict": true,
+   "check_init_hla_identity": true,
+@@ -14,8 +14,8 @@
+   "grad_accum": 1,
+   "num_workers": 0,
+   "dataloader_prefetch_factor": 4,
+-  "max_steps": 20000,
+-  "warmup": 1000,
++  "max_steps": 17900,
++  "warmup": 900,
+   "grad_clip": 1.0,
+   "lr": 0.0006,
+   "min_lr": 6e-05,
+diff --git a/configs/200m_hla_s42.json b/configs/200m_hla_s42.json
+index 83885da..735f6a2 100644
+--- a/configs/200m_hla_s42.json
++++ b/configs/200m_hla_s42.json
+@@ -1,10 +1,10 @@
+ {
+-  "_doc": "HLA GPT for matched experiments. Same backbone as base (200M params, 12L x 1024d x 16H). 5.2B tokens, ~7h on Kaggle TPU v5e-8. HLA components ON. phase_mult=0.15 (user-validated), laplace_alpha=1.0, distance_laplace_alpha=0.5. Sweep phase_mult in {0.05, 0.15, 0.3, 0.5} for paper ablation. [FIX: n_head 12->16, 1024 not divisible by 12]",
++  "_doc": "HLA GPT for matched experiments. Same backbone as base (200M params, 12L x 1024d x 16H). 5.2B tokens, ~7h on Kaggle TPU v5e-8. HLA components ON. phase_mult=0.15 (user-validated), laplace_alpha=1.0, distance_laplace_alpha=0.5. Sweep phase_mult in {0.05, 0.15, 0.3, 0.5} for paper ablation. [FIX: n_head 12->16, 1024 not divisible by 12] [17900 steps = 4.69B tokens: fits the 4.7B Kaggle dataset (platform limit 19.5GB working). Pre-registered dataset-size note in EXPERIMENT_CARD.]",
+   "seed": 42,
+   "save_dir": "/kaggle/working/runs/200m_hla_s42",
+   "run_name": "200m_hla_s42",
+-  "train_path": "/kaggle/input/tokens/train.bin",
+-  "val_path": "/kaggle/input/tokens/val.bin",
++  "train_path": "/kaggle/input/hla-c4-tokens/train_fixed_tokens.bin",
++  "val_path": "/kaggle/input/hla-c4-tokens/val_fixed_tokens.bin",
+   "init_ckpt": "/kaggle/working/inits/init_200m_hla_s42.pt",
+   "init_strict": true,
+   "check_init_hla_identity": true,
+@@ -14,8 +14,8 @@
+   "grad_accum": 1,
+   "num_workers": 0,
+   "dataloader_prefetch_factor": 4,
+-  "max_steps": 20000,
+-  "warmup": 1000,
++  "max_steps": 17900,
++  "warmup": 900,
+   "grad_clip": 1.0,
+   "lr": 0.0006,
+   "min_lr": 6e-05,
+diff --git a/configs/200m_hla_v2_flops_s42.json b/configs/200m_hla_v2_flops_s42.json
+new file mode 100644
+index 0000000..5e887cb
+--- /dev/null
++++ b/configs/200m_hla_v2_flops_s42.json
+@@ -0,0 +1,75 @@
++{
++  "_doc": "Iso-FLOPs axis (Kaggle direction: hla-shorter). base@17900 vs hla@16740: 16740 * 1.0693 = 17900.1 -> compute matched to 0.006%. Answers the equal-compute reviewer question; the token-matched pair remains the PRIMARY attribution comparison (EXPERIMENT_CARD: two axes).",
++  "seed": 42,
++  "save_dir": "/kaggle/working/runs/200m_hla_v2_flops_s42",
++  "run_name": "200m_hla_v2_flops_s42",
++  "train_path": "/kaggle/input/hla-c4-tokens/train_fixed_tokens.bin",
++  "val_path": "/kaggle/input/hla-c4-tokens/val_fixed_tokens.bin",
++  "init_ckpt": "/kaggle/working/inits/init_200m_hla_v2_flops_s42.pt",
++  "init_strict": true,
++  "check_init_hla_identity": true,
++  "expected_vocab_size": 50257,
++  "batch_size_per_device": 16,
++  "eval_batch_size_per_device": 16,
++  "grad_accum": 1,
++  "num_workers": 0,
++  "dataloader_prefetch_factor": 4,
++  "max_steps": 16740,
++  "warmup": 900,
++  "grad_clip": 1.0,
++  "lr": 0.0006,
++  "min_lr": 6e-05,
++  "weight_decay": 0.1,
++  "betas": [
++    0.9,
++    0.95
++  ],
++  "adam_eps": 1e-08,
++  "log_every": 100,
++  "val_every": 500,
++  "svd_every": 2000,
++  "val_batches": 50,
++  "resume_every": 500,
++  "save_every": 0,
++  "keep_last_checkpoints": 2,
++  "min_free_gb": 5.0,
++  "num_cores": 8,
++  "xla_loader_prefetch_size": 8,
++  "xla_device_prefetch_size": 4,
++  "validate_dataset_full": false,
++  "fail_on_nonfinite_val": true,
++  "allow_multiple_epochs": false,
++  "model": {
++    "block_size": 2048,
++    "vocab_size": 50257,
++    "n_layer": 12,
++    "n_head": 16,
++    "n_embd": 1024,
++    "dropout": 0.0,
++    "bias": false,
++    "gradient_checkpointing": true,
++    "fused_swiglu": true,
++    "use_rope": true,
++    "phase_mult": 0.15,
++    "use_laplace": true,
++    "laplace_alpha": 1.0,
++    "laplace_range_k": 0.8,
++    "laplace_range_v": 0.5,
++    "beta_k": 0.7,
++    "beta_v": 0.5,
++    "k_log_clip": 2.0,
++    "v_log_clip": 1.5,
++    "layer_dependent_gate": false,
++    "use_distance_laplace": true,
++    "distance_laplace_alpha": 0.5,
++    "distance_laplace_range": 1.0,
++    "distance_laplace_clip": 1.0,
++    "use_wpe": false,
++    "use_salience_bias": true,
++    "salience_alpha": 1.0,
++    "salience_range": 2.0,
++    "salience_clip": 3.0,
++    "baseline_type": "hla_v2_aggressive_gates_salience"
++  },
++  "variant": "hla_v2_aggressive_gates_salience"
++}
+diff --git a/configs/200m_hla_v2_s42.json b/configs/200m_hla_v2_s42.json
+index f431779..a680851 100644
+--- a/configs/200m_hla_v2_s42.json
++++ b/configs/200m_hla_v2_s42.json
+@@ -1,10 +1,10 @@
+ {
+-  "_doc": "V2 recipe: stronger gate envelope (K mix in [0.56,2.20], V in [0.77,1.43]) + additive per-key salience bias (+-2 nats, weight x0.135..x7.4, no multiplicative floor). Motivation: v1 multiplicative floor (1-beta) capped suppression at x0.73 score scale; salience bias enables true strong suppression/boost of distant tokens. HLA ON.",
++  "_doc": "V2 recipe: stronger gate envelope (K mix in [0.56,2.20], V in [0.77,1.43]) + additive per-key salience bias (+-2 nats, weight x0.135..x7.4, no multiplicative floor). Motivation: v1 multiplicative floor (1-beta) capped suppression at x0.73 score scale; salience bias enables true strong suppression/boost of distant tokens. HLA ON. [17900 steps = 4.69B tokens: fits the 4.7B Kaggle dataset (platform limit 19.5GB working). Pre-registered dataset-size note in EXPERIMENT_CARD.]",
+   "seed": 42,
+   "save_dir": "/kaggle/working/runs/200m_hla_v2_s42",
+   "run_name": "200m_hla_v2_s42",
+-  "train_path": "/kaggle/input/tokens/train.bin",
+-  "val_path": "/kaggle/input/tokens/val.bin",
++  "train_path": "/kaggle/input/hla-c4-tokens/train_fixed_tokens.bin",
++  "val_path": "/kaggle/input/hla-c4-tokens/val_fixed_tokens.bin",
+   "init_ckpt": "/kaggle/working/inits/init_200m_hla_v2_s42.pt",
+   "init_strict": true,
+   "check_init_hla_identity": true,
+@@ -14,8 +14,8 @@
+   "grad_accum": 1,
+   "num_workers": 0,
+   "dataloader_prefetch_factor": 4,
+-  "max_steps": 20000,
+-  "warmup": 1000,
++  "max_steps": 17900,
++  "warmup": 900,
+   "grad_clip": 1.0,
+   "lr": 0.0006,
+   "min_lr": 6e-05,
+diff --git a/configs/tpu3_200m_base_v2_flopslong_s42.json b/configs/tpu3_200m_base_v2_flopslong_s42.json
+new file mode 100644
+index 0000000..116fe7c
+--- /dev/null
++++ b/configs/tpu3_200m_base_v2_flopslong_s42.json
+@@ -0,0 +1,75 @@
++{
++  "_doc": "Iso-FLOPs axis, STRONGEST control (base-longer): base gets +6.93% steps = exactly HLA's extra compute. If hla@20000 beats base@21386, the efficiency claim is unarguable. Together with base@20000 this gives a mini Accuracy-vs-Compute curve (3 base points vs 1 HLA point). TPU only (needs 5.6B tokens - exceeds the Kaggle dataset).",
++  "seed": 42,
++  "save_dir": "runs/tpu3_200m_base_v2_flopslong_s42",
++  "run_name": "tpu3_200m_base_v2_flopslong_s42",
++  "train_path": "data/train_fixed_tokens.bin",
++  "val_path": "data/val_fixed_tokens.bin",
++  "init_ckpt": "inits/init_tpu3_200m_base_v2_flopslong_s42.pt",
++  "init_strict": true,
++  "check_init_hla_identity": true,
++  "expected_vocab_size": 50257,
++  "batch_size_per_device": 16,
++  "eval_batch_size_per_device": 16,
++  "grad_accum": 1,
++  "num_workers": 0,
++  "dataloader_prefetch_factor": 4,
++  "max_steps": 21386,
++  "warmup": 1000,
++  "grad_clip": 1.0,
++  "lr": 0.0006,
++  "min_lr": 6e-05,
++  "weight_decay": 0.1,
++  "betas": [
++    0.9,
++    0.95
++  ],
++  "adam_eps": 1e-08,
++  "log_every": 100,
++  "val_every": 500,
++  "svd_every": 2000,
++  "val_batches": 50,
++  "resume_every": 500,
++  "save_every": 0,
++  "keep_last_checkpoints": 2,
++  "min_free_gb": 5.0,
++  "num_cores": 8,
++  "xla_loader_prefetch_size": 8,
++  "xla_device_prefetch_size": 4,
++  "validate_dataset_full": false,
++  "fail_on_nonfinite_val": true,
++  "allow_multiple_epochs": false,
++  "model": {
++    "block_size": 2048,
++    "vocab_size": 50257,
++    "n_layer": 12,
++    "n_head": 16,
++    "n_embd": 1024,
++    "dropout": 0.0,
++    "bias": false,
++    "gradient_checkpointing": true,
++    "fused_swiglu": true,
++    "use_rope": true,
++    "phase_mult": 0.0,
++    "use_laplace": true,
++    "laplace_alpha": 0.0,
++    "laplace_range_k": 0.8,
++    "laplace_range_v": 0.5,
++    "beta_k": 0.7,
++    "beta_v": 0.5,
++    "k_log_clip": 2.0,
++    "v_log_clip": 1.5,
++    "layer_dependent_gate": false,
++    "use_distance_laplace": true,
++    "distance_laplace_alpha": 0.0,
++    "distance_laplace_range": 1.0,
++    "distance_laplace_clip": 1.0,
++    "use_wpe": false,
++    "use_salience_bias": true,
++    "salience_alpha": 0.0,
++    "salience_range": 2.0,
++    "salience_clip": 3.0,
++    "baseline_type": "base_pm_ablated_v2"
++  },
++  "variant": "base_pm_ablated_v2"
++}
+diff --git a/docs/EXPERIMENT_CARD.md b/docs/EXPERIMENT_CARD.md
+index 43b0a31..a106768 100644
+--- a/docs/EXPERIMENT_CARD.md
++++ b/docs/EXPERIMENT_CARD.md
+@@ -24,6 +24,15 @@ H4: the positional recall curve (positional_recall_curve probe) is FLATTER
+     litm_worst_frac closer to 1) - the Lost-in-the-Middle reading of the
+     distance/salience mechanisms. Pre-registered BEFORE any run has ever
+     produced this curve.
++H5 (CAUSAL, the Oral experiment): transplanting the trained HLA retrieval
++    side into the trained base twin (scripts/causal_patch.py, transplant=
++    retrieval: Q/K rows + phase + K-gate + score biases + q-temp; V-side and
++    MLPs stay base) recovers a majority of the HLA-over-base gap on retrieval
++    probes (induction, distractor_margin). Decision rule: franken closes
++    >50% of the gap => the retrieval-geometry mechanism CAUSES the gain;
++    <20% => the gain lives in the transmission path and the mechanistic
++    narrative must be revised (reported either way). Ladder position: run
++    immediately after the first trained 200M pair.
+ 
+ ## Active mechanism sets per config (B6: capacity vs default)
+ 
+@@ -40,6 +49,24 @@ headline number used everything at once.
+ | `forget` arm | forget only (FoX baseline) | all HLA mechanisms |
+ | `qtemp` arm | qtemp only | all others |
+ 
++## Two comparison axes (pre-registered; both reported)
++
++| Axis | Pair | Question it answers | Status |
++|---|---|---|---|
++| **Token-matched (PRIMARY for attribution)** | base@17900 vs hla@17900 (Kaggle); base@20000 vs hla@20000 (TPU) | "Is the gain caused by the mechanisms?" - everything except mechanisms is identical (same tokens, same order, same init) | primary |
++| **Iso-FLOPs (PRIMARY for efficiency)** | Kaggle: base@17900 vs hla@16740 (compute matched to 0.006%); TPU strongest control: base@21386 vs hla@20000 (base-longer: base receives HLA's +6.93% compute as extra steps) | "Does HLA beat a base given equal compute?" | secondary |
++
++Neither axis alone survives review: token-matched leaves the equal-compute
++question open; iso-FLOPs pairs see different data, so attribution is
++confounded by construction. The TPU base-longer run additionally yields a
++3-point base compute curve (17900-eq / 20000 / 21386) against hla@20000 -
++a mini Accuracy-vs-Compute figure.
++
++Dataset-size note (pre-registered): the Kaggle working-dir limit (19.5 GB)
++caps the Kaggle dataset at 4.7B stored tokens => 200M Kaggle runs use
++max_steps 17900 (4.69B tokens). The month-TPU dataset (28B+) removes this
++cap; TPU 200M runs use the original 20000 steps. Both are reported as-is.
++
+ ## Pre-registered decision rules for architecture simplification
+ 
+ The mechanism set is the UNION of hypotheses, not the claim that every part
+diff --git a/docs/METRICS.md b/docs/METRICS.md
+index f22e16b..7dd839b 100644
+--- a/docs/METRICS.md
++++ b/docs/METRICS.md
+@@ -243,3 +243,15 @@ Mean pairwise Jensen–Shannon divergence between per-head attention
+ distributions at matched positions (bounded by ln 2). Low JS = redundant
+ heads attending alike; rising JS in the HLA run = heads differentiating —
+ the attention-space counterpart of the weight-space interference metrics (§5).
++
++### `scripts/causal_patch.py` (checkpoint-time, the H5 experiment)
++
++Builds a franken model: HLA's trained RETRIEVAL side (Q/K projection rows,
++phases, K-gate, salience/distance/forget biases, q-temp) spliced onto base's
++trained TRANSMISSION side (V rows, output proj, MLPs, embeddings), then runs
++the retrieval probes on base / hla / franken. Gap closure fraction
++(franken-base)/(hla-base) is the pre-registered H5 statistic: >50% = the
++retrieval geometry causally carries the gain; <20% = mechanistic story
++revised. Transplant sets: qk | phase | retrieval | full (full == HLA exactly;
++tested). W_layer_temp is deliberately not transplanted (mixed K/V allegiance
++- documented limitation).
+diff --git a/scripts/causal_patch.py b/scripts/causal_patch.py
+new file mode 100644
+index 0000000..c072505
+--- /dev/null
++++ b/scripts/causal_patch.py
+@@ -0,0 +1,158 @@
++# Copyright 2026 Slyatski Ilya
++#
++# Licensed under the Apache License, Version 2.0 (the "License");
++# you may not use this file except in compliance with the License.
++# You may obtain a copy of the License at
++#
++#     http://www.apache.org/licenses/LICENSE-2.0
++#
++# Unless required by applicable law or agreed to in writing, software
++# distributed under the License is distributed on an "AS IS" BASIS,
++# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++
++
++"""Causal patching: transplant HLA's RETRIEVAL geometry into the base twin.
++
++THE Oral experiment (Type 5: architecture -> mechanism -> behavior). The
++sterile pair guarantees base and HLA share init and data; after training they
++differ only through the mechanisms' influence. This script builds a FRANKEN
++model: HLA's retrieval side (Q/K projections, phases, K-gate, score biases,
++q-temp) spliced onto base's transmission side (V projection, output proj,
++MLPs, embeddings), then measures retrieval behavior (induction, distractor
++margin, positional recall).
++
++Causal logic, pre-registered in EXPERIMENT_CARD (H5):
++  - franken ~ HLA on retrieval probes  => retrieval geometry CARRIES the gain
++    (the mechanistic claim becomes causal, not correlational);
++  - franken ~ base                     => the gain lives in the V/MLP path,
++    and the "cleaner retrieval" story is NOT the cause - report honestly.
++
++Transplant sets (--transplant):
++  qk        : Q,K rows of every c_attn only (pure geometry, no mechanisms)
++  phase     : qk + W_phase_q/k + W_phase_scale
++  retrieval : phase + K-side gate/range + salience + distance + forget + qtemp
++              (everything inside the softmax; V-side stays base)
++  full      : every weight from HLA (sanity: franken == HLA exactly)
++
++Note W_layer_temp is deliberately NOT transplanted in 'retrieval' (it scales
++both K- and V-side envelopes - mixed allegiance; documented limitation).
++
++Works on CPU. Ground-truth tests in tests/test_eval.py::TestCausalPatch.
++"""
++from __future__ import annotations
++
++import argparse
++import json
++import os
++import sys
++from typing import Dict
++
++import torch
++
++ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++if ROOT not in sys.path:
++    sys.path.insert(0, ROOT)
++
++from src.model import GPT, GPTConfig  # noqa: E402
++from src.eval import (  # noqa: E402
++    evaluate_induction,
++    evaluate_distractor_induction,
++    positional_recall_curve,
++)
++
++RETRIEVAL_MECH_KEYS = (
++    ".W_phase_q", ".W_phase_k", ".W_phase_scale",
++    ".W_gate_k.weight", ".W_range_k",
++    ".W_gate_sal.weight", ".W_gate_d.weight",
++    ".W_gate_f.weight", ".W_range_f",
++    ".W_qtemp.weight",
++)
++PHASE_KEYS = (".W_phase_q", ".W_phase_k", ".W_phase_scale")
++
++
++def load_state(path: str) -> Dict[str, torch.Tensor]:
++    try:
++        payload = torch.load(path, map_location="cpu", weights_only=True)
++    except Exception:
++        payload = torch.load(path, map_location="cpu", weights_only=False)
++    state = payload.get("model", payload) if isinstance(payload, dict) else payload
++    return {k: (v.float() if torch.is_tensor(v) and torch.is_floating_point(v) else v)
++            for k, v in state.items()}
++
++
++def build_franken(base_state: Dict[str, torch.Tensor],
++                  hla_state: Dict[str, torch.Tensor],
++                  n_embd: int,
++                  transplant: str) -> Dict[str, torch.Tensor]:
++    """Start from BASE everywhere, splice HLA's retrieval side in."""
++    if set(base_state) != set(hla_state):
++        raise ValueError("state dict key sets differ - not a sterile pair")
++    if transplant == "full":
++        return dict(hla_state)
++
++    out = {k: v.clone() if torch.is_tensor(v) else v for k, v in base_state.items()}
++    for key in hla_state:
++        if ".c_attn.weight" in key:
++            # rows [0:2C] = Q,K (retrieval); rows [2C:3C] = V (transmission)
++            spliced = out[key].clone()
++            spliced[: 2 * n_embd] = hla_state[key][: 2 * n_embd]
++            out[key] = spliced
++        elif transplant in ("phase", "retrieval") and any(p in key for p in PHASE_KEYS):
++            out[key] = hla_state[key].clone()
++        elif transplant == "retrieval" and any(p in key for p in RETRIEVAL_MECH_KEYS):
++            out[key] = hla_state[key].clone()
++    return out
++
++
++def probe(model: GPT, device: str = "cpu") -> Dict[str, float]:
++    out: Dict[str, float] = {}
++    out["induction"] = float(evaluate_induction(model, device=device, batch_size=8))
++    try:
++        d = evaluate_distractor_induction(model, device=device, batch_size=8)
++        out.update({f"distractor_{k}": float(v) for k, v in d.items()})
++    except Exception as e:
++        out["distractor_error"] = str(e)  # type: ignore[assignment]
++    try:
++        out.update({f"posrec_{k}": float(v)
++                    for k, v in positional_recall_curve(model, device=device, batch_size=4).items()})
++    except Exception:
++        pass
++    return out
++
++
++def main() -> None:
++    ap = argparse.ArgumentParser(description="Transplant HLA retrieval geometry into the base twin")
++    ap.add_argument("--base-checkpoint", required=True)
++    ap.add_argument("--hla-checkpoint", required=True)
++    ap.add_argument("--hla-config", required=True,
++                    help="HLA run config (franken runs with mechanisms ACTIVE)")
++    ap.add_argument("--transplant", default="retrieval",
++                    choices=["qk", "phase", "retrieval", "full"])
++    ap.add_argument("--out", required=True)
++    ap.add_argument("--device", default="cpu")
++    args = ap.parse_args()
++
++    cfg = json.load(open(args.hla_config, encoding="utf-8"))["model"]
++    base_state = load_state(args.base_checkpoint)
++    hla_state = load_state(args.hla_checkpoint)
++    franken_state = build_franken(base_state, hla_state, int(cfg["n_embd"]), args.transplant)
++
++    results: Dict[str, Dict[str, float]] = {}
++    for name, state in (("base", base_state), ("hla", hla_state), ("franken", franken_state)):
++        model = GPT(GPTConfig(**cfg)).eval()
++        model.load_state_dict(state, strict=True)
++        results[name] = probe(model, device=args.device)
++        print(f"{name:8s}: " + "  ".join(f"{k}={v:.5f}" for k, v in results[name].items()
++                                         if isinstance(v, float) and "pos_" not in k))
++
++    results["meta"] = {"transplant": args.transplant,  # type: ignore[assignment]
++                       "base_checkpoint": args.base_checkpoint,
++                       "hla_checkpoint": args.hla_checkpoint}
++    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
++    with open(args.out, "w", encoding="utf-8") as f:
++        json.dump(results, f, indent=2)
++    print(f"wrote {args.out}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/src/eval.py b/src/eval.py
+index 1f403a6..3d3d13a 100644
+--- a/src/eval.py
++++ b/src/eval.py
+@@ -81,7 +81,13 @@ def measure_attention_entropy(model, device, seed: int = 42, batch_size: int = 4
+         g = torch.Generator(device="cpu")
+         g.manual_seed(seed)
+         tokens = torch.randint(0, model.config.vocab_size, (batch_size, T), generator=g).to(device)
+-        _ = model(tokens)
++        prev_diag = bool(model.transformer.h[0].attn.capture_diagnostics)
++        prev_attn = bool(model.transformer.h[0].attn.capture_attention)
++        model.set_diagnostics(enabled=True)
++        try:
++            _ = model(tokens)
++        finally:
++            model.set_diagnostics(enabled=prev_diag, capture_attention=prev_attn)
+         entropies = []
+         for block in model.transformer.h:
+             e = getattr(block.attn, "last_entropy", None)
+diff --git a/src/model.py b/src/model.py
+index 7d3d231..14ae82e 100644
+--- a/src/model.py
++++ b/src/model.py
+@@ -196,12 +196,12 @@ class CausalSelfAttention(nn.Module):
+         # with all knobs on: pi*phase_mult*2(head)*2(layer) = 0.6*pi at 0.15.
+         self.layer_dependent_phase = bool(getattr(config, "layer_dependent_phase", False))
+ 
+-        self.use_laplace = getattr(config, "use_laplace", False)
+-        self.laplace_alpha = getattr(config, "laplace_alpha", 1.0)
++        self.use_laplace = getattr(config, "use_laplace", True)
++        self.laplace_alpha = getattr(config, "laplace_alpha", 0.0)
+         self.laplace_range_k = getattr(config, "laplace_range_k", 0.35)
+-        self.laplace_range_v = getattr(config, "laplace_range_v", 0.25)
++        self.laplace_range_v = getattr(config, "laplace_range_v", 0.2)
+         self.beta_k = getattr(config, "beta_k", 0.50)
+-        self.beta_v = getattr(config, "beta_v", 0.30)
++        self.beta_v = getattr(config, "beta_v", 0.25)
+ 
+         self.W_range_k = nn.Parameter(torch.zeros(self.n_head))
+         self.W_range_v = nn.Parameter(torch.zeros(self.n_head))
+@@ -667,7 +667,13 @@ class CausalSelfAttention(nn.Module):
+         # forward wastes O(B*H*T^2) work per layer and adds host-sync pressure
+         # on XLA. Gate it behind eval/diagnostics; measure_attention_entropy()
+         # runs in eval mode, so it still works unchanged.
+-        if (not self.training) or self.capture_diagnostics:
++        # Round 14 review find: this used to run on EVERY eval forward
++        # ((not self.training) or ...), i.e. on all 50 validation batches per
++        # eval - materializing p.float() + p.log() over (B,H,T,T) adds
++        # ~9-13 GB peak at B=16,H=16,T=2048: a real OOM risk on v3-8's
++        # 16 GB/core. Entropy is a PROBE - probes opt in via
++        # set_diagnostics(True) (all eval.py probes already do).
++        if self.capture_diagnostics:
+             with torch.no_grad():
+                 p = att.detach().float().clamp(min=1e-9)
+                 entropy = -(p * p.log()).sum(dim=-1).mean(dim=(0, 2))  # (H,)
+diff --git a/tests/test_ablation_configs.py b/tests/test_ablation_configs.py
+index 7f3f5dc..fcf646c 100644
+--- a/tests/test_ablation_configs.py
++++ b/tests/test_ablation_configs.py
+@@ -772,3 +772,40 @@ class TestRound8Tooling:
+         d = _json.loads(out.read_text())
+         assert "hla_over_base_ratio" in d and d["hla_over_base_ratio"] > 0
+         assert d["base"]["params"] == d["hla"]["params"]
++
++
++class TestIsoFlopsPairs:
++    """Round 13: both comparison axes must stay internally consistent."""
++
++    RATIO = 1.0693  # profile_flops, v2 recipe @ 2048
++
++    def _steps(self, name):
++        cfg = json.load(open(os.path.join(ROOT, "configs", name)))
++        return int(cfg["max_steps"])
++
++    def test_kaggle_iso_flops_pair_matched(self):
++        base = self._steps("200m_base_v2_s42.json")
++        hla = self._steps("200m_hla_v2_flops_s42.json")
++        assert hla < base, "iso-FLOPs on Kaggle must be hla-shorter"
++        mismatch = abs(hla * self.RATIO - base) / base
++        assert mismatch < 0.001, f"FLOPs mismatch {mismatch:.4%} exceeds 0.1%"
++
++    def test_tpu_base_longer_pair_matched(self):
++        base = self._steps("tpu3_200m_base_v2_flopslong_s42.json")
++        hla = self._steps("tpu3_200m_hla_v2_s42.json")
++        assert base > hla, "TPU iso-FLOPs must be base-longer (strongest control)"
++        mismatch = abs(hla * self.RATIO - base) / base
++        assert mismatch < 0.001, f"FLOPs mismatch {mismatch:.4%} exceeds 0.1%"
++
++    def test_kaggle_200m_fits_dataset(self):
++        """17900 steps x 262144 tok/step must fit the 4.7B-token dataset."""
++        for name in ("200m_base_s42.json", "200m_hla_s42.json",
++                     "200m_base_v2_s42.json", "200m_hla_v2_s42.json"):
++            cfg = json.load(open(os.path.join(ROOT, "configs", name)))
++            tokens = cfg["max_steps"] * cfg["batch_size_per_device"] * cfg["grad_accum"] * 8 * 2048
++            assert tokens <= 4_700_000_000, f"{name}: needs {tokens/1e9:.2f}B > 4.7B dataset"
++
++    def test_experiment_card_documents_axes(self):
++        card = open(os.path.join(ROOT, "docs", "EXPERIMENT_CARD.md"), encoding="utf-8").read()
++        assert "Two comparison axes" in card
++        assert "base-longer" in card
+diff --git a/tests/test_eval.py b/tests/test_eval.py
+index e256f2d..b0bf316 100644
+--- a/tests/test_eval.py
++++ b/tests/test_eval.py
+@@ -682,3 +682,66 @@ class TestPositionalRecall:
+                       n_embd=32, gradient_checkpointing=False)
+         out = positional_recall_curve(GPT(c), batch_size=2)
+         assert abs(out["litm_middle_drop"]) < 1e-4
++
++
++class TestCausalPatch:
++    """Round 14: the Oral experiment's tooling - transplant correctness."""
++
++    KW = dict(block_size=64, vocab_size=50257, n_layer=2, n_head=2, n_embd=32,
++              gradient_checkpointing=False, use_rope=True, use_wpe=False,
++              phase_mult=0.15, use_laplace=True, laplace_alpha=1.0,
++              use_salience_bias=True, salience_alpha=1.0,
++              use_distance_laplace=True, distance_laplace_alpha=0.5)
++
++    def _pair(self):
++        import importlib, sys as _sys
++        _sys.path.insert(0, os.path.join(ROOT, "scripts"))
++        cp = importlib.import_module("causal_patch")
++        torch.manual_seed(0)
++        hla = GPT(GPTConfig(**self.KW))
++        base = GPT(GPTConfig(**self.KW))
++        base.load_state_dict(hla.state_dict())
++        with torch.no_grad():  # раздвигаем близнецов детерминированно
++            for blk in hla.transformer.h:
++                blk.attn.W_phase_q.normal_(0, 0.2, generator=torch.Generator().manual_seed(1))
++                blk.attn.W_gate_k.weight.normal_(0, 0.2, generator=torch.Generator().manual_seed(2))
++            for blk in base.transformer.h:
++                blk.attn.c_attn.weight.add_(0.01)
++        return cp, base.state_dict(), hla.state_dict()
++
++    def test_full_transplant_equals_hla(self):
++        cp, bs, hs = self._pair()
++        fr = cp.build_franken(bs, hs, 32, "full")
++        assert all(torch.equal(fr[k], hs[k]) for k in hs)
++
++    def test_qk_rows_spliced_v_rows_kept(self):
++        cp, bs, hs = self._pair()
++        fr = cp.build_franken(bs, hs, 32, "qk")
++        key = next(k for k in hs if "c_attn.weight" in k)
++        assert torch.equal(fr[key][:64], hs[key][:64])   # Q,K <- HLA
++        assert torch.equal(fr[key][64:], bs[key][64:])   # V  <- base
++
++    def test_retrieval_transplant_boundaries(self):
++        """Retrieval mechanisms come from HLA; the V-side gate must stay base
++        - the whole point is that transmission remains untouched."""
++        cp, bs, hs = self._pair()
++        fr = cp.build_franken(bs, hs, 32, "retrieval")
++        kq = next(k for k in hs if "W_phase_q" in k)
++        kv = next(k for k in hs if "W_gate_v.weight" in k)
++        km = next(k for k in hs if "mlp" in k and "weight" in k)
++        assert torch.equal(fr[kq], hs[kq])
++        assert torch.equal(fr[kv], bs[kv])
++        assert torch.equal(fr[km], bs[km])
++
++    def test_franken_state_loads_strict(self):
++        cp, bs, hs = self._pair()
++        fr = cp.build_franken(bs, hs, 32, "retrieval")
++        m = GPT(GPTConfig(**self.KW))
++        m.load_state_dict(fr, strict=True)  # raises on any mismatch
++
++    def test_mismatched_pair_rejected(self):
++        import pytest as _pytest
++        cp, bs, hs = self._pair()
++        bad = dict(bs); bad.pop(next(iter(bad)))
++        with _pytest.raises(ValueError, match="not a sterile pair"):
++            cp.build_franken(bad, hs, 32, "qk")
+diff --git a/tests/test_model.py b/tests/test_model.py
+index 321f7ec..cb6d05b 100644
+--- a/tests/test_model.py
++++ b/tests/test_model.py
+@@ -847,10 +847,20 @@ class TestDiagnosticsGating:
+         model(x, x)
+         assert model.transformer.h[0].attn.last_entropy is None
+ 
+-    def test_entropy_computed_in_eval(self):
++    def test_entropy_not_computed_in_plain_eval(self):
++        """Round 14: plain eval (validation!) must NOT pay the (B,H,T,T)
++        fp32 entropy cost - it OOMed v3-8 at 2048 context. Probes opt in
++        via set_diagnostics."""
+         model = GPT(small_cfg(**HLA_KW)).eval()
+         x = torch.randint(0, 256, (1, 16))
+         model(x)
++        assert model.transformer.h[0].attn.last_entropy is None
++
++    def test_entropy_computed_in_eval_with_diagnostics(self):
++        model = GPT(small_cfg(**HLA_KW)).eval()
++        model.set_diagnostics(enabled=True)
++        x = torch.randint(0, 256, (1, 16))
++        model(x)
+         e = model.transformer.h[0].attn.last_entropy
+         assert e is not None and torch.isfinite(e).all()
+ 
+@@ -1065,3 +1075,36 @@ class TestRangeFlex:
+             small_cfg(range_flex=0.0)
+         with _pt.raises(ValueError):
+             small_cfg(range_flex=1.5)
++
++
++class TestGetattrDefaultsSync:
++    """Round 16 (the user asked: check what you asked me to check):
++    every getattr(config, name, default) in model.py must default to the SAME
++    value as GPTConfig - a mismatch is a dormant double-truth that silently
++    activates if the model is ever built from a legacy dict/namespace.
++    Found live: use_laplace False-vs-True, laplace_alpha 1.0-vs-0.0,
++    laplace_range_v 0.25-vs-0.2, beta_v 0.3-vs-0.25."""
++
++    def test_all_getattr_defaults_match_gptconfig(self):
++        import re, dataclasses
++        from src.model import GPTConfig
++        src = open(os.path.join(ROOT, "src", "model.py"), encoding="utf-8").read()
++        cfg = {f.name: f.default for f in dataclasses.fields(GPTConfig)}
++        bad = []
++        for m in re.finditer(r'getattr\(config,\s*"(\w+)",\s*([^)]+)\)', src):
++            name, default_str = m.group(1), m.group(2).strip()
++            if name not in cfg:
++                bad.append((name, default_str, "missing from GPTConfig"))
++                continue
++            inner = re.sub(r'^(float|bool|int|str)\(', '', default_str).rstrip(')')
++            try:
++                val = eval(inner, {}, {})
++            except Exception:
++                continue
++            expected = cfg[name]
++            same = (abs(float(val) - float(expected)) < 1e-12
++                    if isinstance(expected, float) or isinstance(val, float)
++                    else val == expected)
++            if not same:
++                bad.append((name, val, expected))
++        assert not bad, f"getattr defaults out of sync with GPTConfig: {bad}"
