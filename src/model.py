@@ -659,9 +659,14 @@ class CausalSelfAttention(nn.Module):
         mask = self.mask[:, :, :T, :T]
         att = att.masked_fill(~mask, float("-inf"))
 
-        att = att.float()
-        att = att - att.amax(dim=-1, keepdim=True)
-        att = F.softmax(att, dim=-1).to(q.dtype)
+        # TPU day-1 memory fix: the old code did att.float() BEFORE softmax,
+        # materializing an fp32 (B,H,T,T) copy per layer that XLA kept alive
+        # for backward - 12 layers x 4 GB = 48 GB at B=16,T=2048 (measured in
+        # the OOM dump). F.softmax(dtype=torch.float32) computes softmax in
+        # fp32 internally (bit-identical in fp32 runs; fp32-accurate
+        # normalization under bf16) but lets the fused kernel avoid the
+        # stored fp32 activation.
+        att = F.softmax(att, dim=-1, dtype=torch.float32).to(q.dtype)
 
         # Entropy is an eval-time diagnostic. Computing it on EVERY training
         # forward wastes O(B*H*T^2) work per layer and adds host-sync pressure
@@ -926,7 +931,28 @@ class GPT(nn.Module):
 
         for block in self.transformer.h:
             if self.gradient_checkpointing and self.training:
-                x = checkpoint.checkpoint(block, x, use_reentrant=False)
+                # TPU day-1 fix: new torch's checkpoint(use_reentrant=False)
+                # resolves the device module via getattr(torch, 'xla'), which
+                # does not exist (XLA lives in the separate torch_xla package)
+                # -> AttributeError on the first forward. Fall back to a plain
+                # call once, loudly, instead of crashing the run.
+                try:
+                    x = checkpoint.checkpoint(block, x, use_reentrant=False)
+                except AttributeError as e:
+                    if "has no attribute 'xla'" not in str(e):
+                        raise
+                    if not getattr(self, "_ckpt_fallback_warned", False):
+                        self._ckpt_fallback_warned = True
+                        import warnings as _w
+                        _w.warn(
+                            "gradient_checkpointing disabled at runtime: torch "
+                            "checkpoint is incompatible with this torch_xla "
+                            "(torch.xla device module missing). Running without "
+                            "activation checkpointing - watch memory on large models.",
+                            stacklevel=1,
+                        )
+                    self.gradient_checkpointing = False
+                    x = block(x)
             else:
                 x = block(x)
 

@@ -273,3 +273,56 @@ class TestCompatChecks:
     def test_none_saved_is_ok(self):
         validate_resume_config_compatibility({"seed": 1}, None)
         validate_init_config_compatibility({"model": {}}, None)
+
+
+class TestTpuDay1Fixes:
+    """Regression tests for the six day-1-on-real-TPU findings."""
+
+    def test_kaggle_env_scrubbed_before_xla_import(self):
+        src = open(os.path.join(ROOT, "src", "train_xla.py")).read()
+        scrub = src.find("TPU_PROCESS_ADDRESSES")
+        xla_import = src.find("import torch_xla.core.xla_model")
+        assert 0 < scrub < xla_import, "Kaggle env scrub must run BEFORE torch_xla import"
+
+    def test_rank_world_use_modern_runtime_api(self):
+        src = open(os.path.join(ROOT, "src", "train_xla.py")).read()
+        assert "xr.global_ordinal()" in src, "rank must prefer torch_xla.runtime"
+        assert "xr.world_size()" in src
+        assert "import torch_xla.runtime as xr" in src
+
+    def test_spawn_maps_nprocs_for_pjrt(self):
+        src = open(os.path.join(ROOT, "src", "train_xla.py")).read()
+        assert "nprocs=(1 if nprocs == 1 else None)" in src, (
+            "PJRT accepts only nprocs=1 or None")
+
+    def test_softmax_no_fp32_materialization(self):
+        """The fp32 att copy per layer cost 12 x 4 GB at B=16,T=2048 (measured
+        OOM). softmax(dtype=fp32) is bit-identical (verified) without it."""
+        src = open(os.path.join(ROOT, "src", "model.py")).read()
+        assert "F.softmax(att, dim=-1, dtype=torch.float32)" in src
+        assert "att = att.float()\n        att = att - att.amax" not in src
+
+    def test_softmax_numerics_unchanged(self):
+        import torch
+        import torch.nn.functional as F
+        torch.manual_seed(0)
+        att = torch.randn(2, 4, 32, 32)
+        mask = torch.tril(torch.ones(32, 32, dtype=torch.bool))
+        a = att.masked_fill(~mask, float("-inf"))
+        old = F.softmax(a.float() - a.float().amax(-1, keepdim=True), dim=-1)
+        new = F.softmax(a, dim=-1, dtype=torch.float32)
+        assert torch.equal(old, new)
+
+    def test_checkpoint_fallback_wrapper_present(self):
+        src = open(os.path.join(ROOT, "src", "model.py")).read()
+        assert "has no attribute 'xla'" in src, (
+            "grad-checkpointing must fall back (not crash) on torch/xla mismatch")
+
+    def test_kaggle_200m_configs_disable_grad_checkpointing(self):
+        import glob as _glob, json as _json
+        for f in _glob.glob(os.path.join(ROOT, "configs", "kaggle_*.json")) + \
+                 _glob.glob(os.path.join(ROOT, "configs", "200m_*.json")):
+            cfg = _json.load(open(f))
+            assert cfg["model"].get("gradient_checkpointing") is False, (
+                f"{os.path.basename(f)}: 200M fits without checkpointing; "
+                "the torch/xla checkpoint bug makes it a liability")

@@ -47,7 +47,7 @@
     "n_embd": 1024,
     "dropout": 0.0,
     "bias": false,
-    "gradient_checkpointing": true,
+    "gradient_checkpointing": false,
     "fused_swiglu": true,
     "use_rope": true,
     "phase_mult": 0.15,
