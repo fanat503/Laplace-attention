@@ -67,6 +67,15 @@ from torch.utils.data import DataLoader, Sampler
 # `python src/train_xla.py --help`, imports and doc tooling work on CPU-only
 # hosts. Actual training still requires torch_xla and fails fast with a clear
 # message in main() instead of an ImportError at line 1 of the traceback.
+# Kaggle TPU day-1 fix: Kaggle exports TPU_PROCESS_ADDRESSES/CLOUD_TPU_TASK_ID
+# which confuse the modern PJRT runtime into "Expected 8 worker addresses,
+# got 1" during multiprocess init. Scrub them BEFORE torch_xla import.
+# Harmless elsewhere: the variables simply do not exist on TPU-VM/GCE.
+for _kaggle_var in ("TPU_PROCESS_ADDRESSES", "CLOUD_TPU_TASK_ID",
+                    "TPU_MESH_CONTROLLER_ADDRESS", "TPU_MESH_CONTROLLER_PORT"):
+    os.environ.pop(_kaggle_var, None)
+os.environ.setdefault("PJRT_DEVICE", "TPU")
+
 try:
     import torch_xla.core.xla_model as xm
     import torch_xla.distributed.parallel_loader as pl
@@ -75,6 +84,10 @@ except ImportError:  # pragma: no cover - CPU-only host
     xm = None
     pl = None
     xmp = None
+try:
+    import torch_xla.runtime as xr  # modern PJRT world/ordinal API
+except Exception:  # pragma: no cover
+    xr = None
 try:
     import torch_xla.debug.metrics as xla_metrics
 except Exception:  # pragma: no cover - version dependent
@@ -147,6 +160,16 @@ def install_signal_handlers() -> None:
 
 
 def xla_rank() -> int:
+    # PJRT day-1 fix: on the modern runtime the legacy xm.get_ordinal() may
+    # report 0 in EVERY spawned process ("world_size=1, rank=0" x8), which
+    # breaks data sharding (all cores chew the same batch -> 8x memory, OOM)
+    # and master-only saves (8 self-declared masters -> tmp-file rename race).
+    # torch_xla.runtime.global_ordinal() is the authoritative source.
+    if xr is not None:
+        try:
+            return int(xr.global_ordinal())
+        except Exception:
+            pass
     try:
         return int(xm.get_ordinal())
     except Exception:
@@ -154,6 +177,11 @@ def xla_rank() -> int:
 
 
 def xla_local_rank() -> int:
+    if xr is not None:
+        try:
+            return int(xr.local_ordinal())
+        except Exception:
+            pass
     try:
         return int(xm.get_local_ordinal())
     except Exception:
@@ -161,6 +189,11 @@ def xla_local_rank() -> int:
 
 
 def xla_world_size() -> int:
+    if xr is not None:
+        try:
+            return int(xr.world_size())
+        except Exception:
+            pass
     try:
         return int(xm.xrt_world_size())
     except Exception:
@@ -171,6 +204,11 @@ def xla_world_size() -> int:
 
 
 def is_master() -> bool:
+    if xr is not None:
+        try:
+            return int(xr.global_ordinal()) == 0
+        except Exception:
+            pass
     try:
         return bool(xm.is_master_ordinal(local=False))
     except Exception:
@@ -1714,7 +1752,10 @@ def train_worker_xla(config: Dict[str, Any]) -> None:
     validate_config(config)
     nprocs = int(config.get("num_cores", 8))
     start_method = str(config.get("xmp_start_method", "fork"))
-    xmp.spawn(_train_worker_fn, args=(config,), nprocs=nprocs, start_method=start_method)
+    # PJRT accepts only nprocs=1 or None (None = all local devices).
+    # num_cores=1 -> single-process debug; anything else -> None (8 cores).
+    xmp.spawn(_train_worker_fn, args=(config,),
+              nprocs=(1 if nprocs == 1 else None), start_method=start_method)
 
 
 def load_config(path: str) -> Dict[str, Any]:
