@@ -23,11 +23,11 @@ git clone https://github.com/fanat503/Laplace-attention.git
 cd Laplace-attention
 pip install -r requirements.txt        # yoou can use CPU
 
-python -m pytest tests/ -q             # 290 passed
+python -m pytest tests/ -q      
 python scripts/audit_sterility.py      
 ```
 
-Train base/HLA pair (TPU/XLA; every step below also runs on CPU for smoke test):
+Train base/HLA pair
 
 ```bash
 
@@ -46,19 +46,6 @@ python scripts/make_ablation_configs.py \
     --outdir configs/ablations_200m --seeds 42 43 44
 ```
 
-Our experimental design: [`docs/EXPERIMENT_CARD.md`](docs/EXPERIMENT_CARD.md).
-
-
-## Repository 
-
-```
-├── src/          Model.py (GPT + mechanisms), train_xla.py (TPU trainer), eval.py (probes)
-│                 Make_init.py, data.py, manifest.py, utils.py
-├── configs/      20 paired base/HLA JSONs, FLOPs-matched
-├── scripts/      Validation, experiment, analysis
-├── docs/         Theory, metrics, etc.
-└── tests/        290 tests
-```
 
 ## Citation
 
