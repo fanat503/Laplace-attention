@@ -115,17 +115,25 @@ MECHANISM_PANELS = [
      ["layer_temp_last", "phase_budget_mean", "qtemp_mean"]),
     ("Spectral shape", "rank / share",
      ["svd_phase_erank", "svd_qk_stable_rank", "svd_v_stable_rank"]),
+    ("Lost-in-the-Middle (H4)", "P(B) / drop",
+     ["pos_10", "pos_30", "pos_50", "pos_70", "pos_90", "litm_middle_drop"]),
 ]
 
 
 def plot_mechanism_dashboard(logs: Dict[str, Dict[str, List[float]]], out: str) -> None:
-    """One figure, six panels: every diagnostic CSV column family vs tokens.
+    """One figure, one panel per MECHANISM_PANELS entry: every diagnostic
+    CSV column family vs tokens.
 
     Columns that are all-NaN in a log (mechanism inactive / cadence gated)
     are skipped silently, so the same dashboard works for base and HLA runs.
     """
     plt = require_matplotlib()
-    fig, axes = plt.subplots(3, 2, figsize=(13, 12))
+    # Grid derived from the panel list: zip() would SILENTLY drop panels
+    # if the list outgrew a hard-coded grid (it did once: LITM panel #7).
+    nrows = (len(MECHANISM_PANELS) + 1) // 2
+    fig, axes = plt.subplots(nrows, 2, figsize=(13, 4 * nrows))
+    for extra_ax in list(axes.flat)[len(MECHANISM_PANELS):]:
+        extra_ax.set_visible(False)
     for ax, (title, ylabel, cols) in zip(axes.flat, MECHANISM_PANELS):
         drew = False
         for name, log in logs.items():

@@ -72,3 +72,18 @@ jobs:
           python scripts/ci_check_analysis.py /tmp/ana.json
           python scripts/sample.py --checkpoint /tmp/init_smoke.pt --config configs/smoke_hla_s42.json --start-ids 1,2,3 --max-new-tokens 5 --greedy
           python scripts/bench.py --base configs/smoke_hla_s42.json --hla configs/smoke_hla_s42.json --steps 2 --batch 1 --seq-len 32 --n-layer 1
+
+      - name: Trainer loop dry run (the REAL train_xla loop on CPU)
+        run: |
+          # Day-1 lesson: --help + unit tests exercise everything EXCEPT the
+          # training loop itself; every loop-level bug cost a Kaggle TPU
+          # session to discover. This runs the actual worker (train/val/eval/
+          # checkpoint/CSV/probes) end-to-end on CPU via a torch_xla stub,
+          # then gates on a real (non-NaN) H4/LITM trajectory in the CSV.
+          python src/make_init.py --config configs/smoke_hla_s42.json --out data/init_hla_smoke_s42.pt
+          python scripts/dry_run_cpu.py --config configs/smoke_hla_s42.json \
+            --override max_steps=4 --override val_every=2 --override svd_every=2 \
+            --override resume_every=2 --override save_every=0 --override val_batches=1 \
+            | tee /tmp/dry_run.log
+          grep -q "DRY RUN COMPLETE" /tmp/dry_run.log
+          python scripts/check_litm_csv.py --csv runs/smoke_hla_s42/train_log_smoke_hla_s42.csv

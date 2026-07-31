@@ -134,6 +134,11 @@ try:  # Optional: Theorem-5 gradient-norm readout (captured at svd cadence).
 except Exception:  # pragma: no cover
     mechanism_gradient_statistics = None
 
+try:  # Optional: Lost-in-the-Middle recall curve (H4), captured at svd cadence.
+    from src.eval import positional_recall_curve  # type: ignore  # noqa: E402
+except Exception:  # pragma: no cover
+    positional_recall_curve = None
+
 
 # =============================================================================
 # Process / XLA helpers
@@ -213,6 +218,24 @@ def is_master() -> bool:
         return bool(xm.is_master_ordinal(local=False))
     except Exception:
         return xla_rank() == 0
+
+
+def check_world_size(config: Dict[str, Any], *, world_size: int, rank: int) -> None:
+    # Day-1 postmortem guard: when the runtime misreports ordinals (legacy
+    # xm.get_ordinal() on PJRT returned rank=0/world=1 in EVERY process), the
+    # failure is SILENT - 8 processes chew identical batches, "Tokens/update"
+    # is 8x smaller than reality, checkpoint saves race, and every downstream
+    # number is garbage. A config asking for N cores that observes a smaller
+    # world must die loudly before any training step.
+    expected_world = int(config.get("num_cores", 8))
+    if expected_world > 1 and int(world_size) < expected_world:
+        raise RuntimeError(
+            f"World-size mismatch: config num_cores={expected_world} but the "
+            f"XLA runtime reports world_size={world_size} (rank={rank}). "
+            "This is the day-1 PJRT ordinal bug signature - data sharding and "
+            "master-only saves would be silently wrong. Fix the runtime "
+            "(torch_xla.runtime ordinals) or set num_cores to match."
+        )
 
 
 def master_print(*args: Any, **kwargs: Any) -> None:
@@ -1096,6 +1119,21 @@ def master_extra_metrics(
                         metrics[k] = float(mg[k])
             except Exception as e:
                 master_print(f"[WARN] mechanism_gradient_statistics failed: {e}")
+
+        # H4 (Lost-in-the-Middle) needs a TRAINING-TIME trajectory, not just a
+        # final-checkpoint number: the claim is that HLA flattens the U-curve
+        # relative to the base twin, and reviewers will ask WHEN the flattening
+        # emerges. Same cadence as SVD (expensive: 5 depth fractions x forward).
+        if with_svd and positional_recall_curve is not None:
+            try:
+                t0 = time.time()
+                for k, v in positional_recall_curve(
+                    model, device=device, seed=int(config.get("seed", 42))
+                ).items():
+                    metrics[str(k)] = float(v)
+                master_print(f"[LITM] computed in {time.time() - t0:.1f}s")
+            except Exception as e:
+                master_print(f"[WARN] positional_recall_curve failed: {e}")
     finally:
         model.train(was_training)
     return metrics
@@ -1158,6 +1196,13 @@ def open_csv(save_dir: str, run_name: str, config: Dict[str, Any], param_report:
             "mech_grad_min",
             "qtemp_mean",
             "qtemp_sat_frac",
+            "pos_10",
+            "pos_30",
+            "pos_50",
+            "pos_70",
+            "pos_90",
+            "litm_middle_drop",
+            "litm_worst_frac",
         ])
     else:
         writer.writerow([])
@@ -1187,6 +1232,8 @@ def _train_worker_fn(index: int, config: Dict[str, Any]) -> None:
     local_rank = xla_local_rank()
     world_size = xla_world_size()
     master = is_master()
+
+    check_world_size(config, world_size=world_size, rank=rank)
 
     save_dir = str(config["save_dir"])
     run_name = str(config.get("run_name", "xla_run"))
@@ -1395,6 +1442,12 @@ def _train_worker_fn(index: int, config: Dict[str, Any]) -> None:
                     "epoch": int(epoch),
                     "wall_time_sec": float(time.time() - train_start_time),
                     "config_hash": config_hash(config),
+                    # Throughput accounting for budget planning: world_size
+                    # proves sharding was real (day-1 bug wrote plausible
+                    # run_states with 8x-wrong token counts), tokens_per_update
+                    # makes tokens/sec recomputable from this file alone.
+                    "world_size": int(world_size),
+                    "tokens_per_update": int(tokens_per_update),
                 },
             )
 
@@ -1618,6 +1671,13 @@ def _train_worker_fn(index: int, config: Dict[str, Any]) -> None:
                         fmt(metrics.get("mech_grad_min", float("nan"))),
                         fmt(metrics.get("qtemp_mean", float("nan"))),
                         fmt(metrics.get("qtemp_sat_frac", float("nan"))),
+                        fmt(metrics.get("pos_10", float("nan"))),
+                        fmt(metrics.get("pos_30", float("nan"))),
+                        fmt(metrics.get("pos_50", float("nan"))),
+                        fmt(metrics.get("pos_70", float("nan"))),
+                        fmt(metrics.get("pos_90", float("nan"))),
+                        fmt(metrics.get("litm_middle_drop", float("nan"))),
+                        fmt(metrics.get("litm_worst_frac", float("nan"))),
                     ])
                     csv_file.flush()
                     master_print(

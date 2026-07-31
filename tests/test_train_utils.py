@@ -326,3 +326,87 @@ class TestTpuDay1Fixes:
             assert cfg["model"].get("gradient_checkpointing") is False, (
                 f"{os.path.basename(f)}: 200M fits without checkpointing; "
                 "the torch/xla checkpoint bug makes it a liability")
+
+
+class TestPilotReadiness:
+    """Pre-pilot hardening: findings from the day-1 postmortem that would
+    only bite AFTER a run finished (wrong numbers, missing curves)."""
+
+    def test_world_size_mismatch_fails_fast(self):
+        """The day-1 ordinal bug (world_size=1 x8 processes) was SILENT: the
+        run trained, saved checkpoints and logged plausible CSV rows - with
+        every token count 8x wrong and racing saves. Must die before step 0."""
+        from src.train_xla import check_world_size
+        cfg = {"num_cores": 8}
+        with pytest.raises(RuntimeError, match="World-size mismatch"):
+            check_world_size(cfg, world_size=1, rank=0)
+        # Healthy worlds pass.
+        check_world_size(cfg, world_size=8, rank=3)
+        # Single-core debug mode is exempt (no sharding to corrupt).
+        check_world_size({"num_cores": 1}, world_size=1, rank=0)
+
+    def test_trainer_calls_world_size_guard(self):
+        src = open(os.path.join(ROOT, "src", "train_xla.py")).read()
+        assert "check_world_size(config, world_size=world_size, rank=rank)" in src, (
+            "guard must run inside the worker, after ordinals are read")
+
+    def test_litm_curve_logged_in_csv(self):
+        """H4 needs a training-time trajectory ('when does the U-curve
+        flatten?'), not just a final-checkpoint probe. The columns must exist
+        in header AND row (lockstep is covered by the generic CSV test)."""
+        src = open(os.path.join(ROOT, "src", "train_xla.py")).read()
+        for col in ("pos_10", "pos_50", "pos_90",
+                    "litm_middle_drop", "litm_worst_frac"):
+            assert f'"{col}"' in src, f"CSV header must include {col}"
+            assert f'metrics.get("{col}"' in src, f"CSV row must write {col}"
+        assert "positional_recall_curve" in src, (
+            "trainer must import and call the LITM probe")
+
+    def test_run_state_records_world_and_tokens_per_update(self):
+        """run_state_*.json is the budget-planning source of truth; after the
+        day-1 bug it must prove sharding was real."""
+        src = open(os.path.join(ROOT, "src", "train_xla.py")).read()
+        assert '"world_size": int(world_size)' in src
+        assert '"tokens_per_update": int(tokens_per_update)' in src
+
+    def test_plot_dashboard_grid_fits_all_panels(self):
+        """zip() over a hard-coded 3x2 grid silently dropped panel #7 (LITM).
+        The grid must be derived from MECHANISM_PANELS."""
+        import importlib.util as _ilu
+        spec = _ilu.spec_from_file_location(
+            "make_plots", os.path.join(ROOT, "scripts", "make_plots.py"))
+        mod = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        assert any("pos_10" in cols for _, _, cols in mod.MECHANISM_PANELS), (
+            "LITM panel missing from dashboard")
+        src = open(os.path.join(ROOT, "scripts", "make_plots.py")).read()
+        assert "len(MECHANISM_PANELS)" in src, (
+            "subplot grid must be computed from the panel list, not hard-coded")
+
+
+class TestDryRunHarness:
+    """scripts/dry_run_cpu.py runs the REAL trainer loop on CPU. Before it
+    existed, the training loop itself was only ever executed on TPU - every
+    integration bug (CSV wiring, probe calls, save paths) cost a Kaggle
+    session to discover."""
+
+    def test_dry_run_script_exists_and_parses(self):
+        path = os.path.join(ROOT, "scripts", "dry_run_cpu.py")
+        assert os.path.exists(path)
+        import ast
+        ast.parse(open(path).read())
+
+    def test_dry_run_forces_single_core(self):
+        """The world-size guard (correctly) kills num_cores=8 with world=1;
+        the dry run must therefore always pin num_cores=1, or it would die
+        on every multi-core config."""
+        src = open(os.path.join(ROOT, "scripts", "dry_run_cpu.py")).read()
+        assert 'config["num_cores"] = 1' in src
+        assert 'config["num_workers"] = 0' in src
+
+    def test_dry_run_stubs_modern_runtime_module(self):
+        """train_xla.py prefers torch_xla.runtime ordinals (day-1 fix); a stub
+        without that module would silently exercise only the legacy path."""
+        src = open(os.path.join(ROOT, "scripts", "dry_run_cpu.py")).read()
+        assert "torch_xla.runtime" in src
+        assert "global_ordinal" in src and "world_size" in src
