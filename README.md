@@ -8,15 +8,15 @@ Separating finding tokens from transmitting them in attention
 
 Every attention head does two jobs with one set of vectors: retrieval and transmission. They interfere. HLA gives each job its own channel.
 
-This repository contains:
+This repository has:
 
-1. The mechanism (one modified attention equation) ([`src/model.py`](src/model.py), single file);
+1. The mechanism (one modified attention equation) ([`src/model.py`](src/model.py));
 2. A sterile comparison;
-3. Theory ([`docs/THEORY.md`](docs/THEORY.md)) and metrics ([`docs/METRICS.md`](docs/METRICS.md)).
+3. Metrics ([`docs/METRICS.md`](docs/METRICS.md)).
 
 
 
-## Getting started
+## How to start
 
 ```bash
 git clone https://github.com/fanat503/Laplace-attention.git
@@ -46,10 +46,10 @@ python scripts/make_ablation_configs.py \
     --outdir configs/ablations_200m --seeds 42 43 44
 ```
 
-We wrote our experimental design on [`docs/EXPERIMENT_CARD.md`](docs/EXPERIMENT_CARD.md).
+Our experimental design: [`docs/EXPERIMENT_CARD.md`](docs/EXPERIMENT_CARD.md).
 
 
-## Repository layout
+## Repository 
 
 ```
 ├── src/          Model.py (GPT + mechanisms), train_xla.py (TPU trainer), eval.py (probes)
@@ -64,4 +64,4 @@ We wrote our experimental design on [`docs/EXPERIMENT_CARD.md`](docs/EXPERIMENT_
 
 If you use this code, please cite it via [`CITATION.cff`](CITATION.cff).
 
-**Apache-2.0** · Independent research; contributions, replications, and compute support welcome — open an issue.
+**Apache-2.0**
