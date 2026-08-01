@@ -10,7 +10,7 @@ Every attention head does two jobs with one set of vectors: retrieval and transm
 
 This repository has:
 
-1. The mechanism (one modified attention equation) ([`src/model.py`](src/model.py));
+1. The mechanism ([`src/model.py`](src/model.py));
 2. A sterile comparison;
 3. Metrics ([`docs/METRICS.md`](docs/METRICS.md)).
 
