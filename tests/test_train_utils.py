@@ -410,3 +410,78 @@ class TestDryRunHarness:
         src = open(os.path.join(ROOT, "scripts", "dry_run_cpu.py")).read()
         assert "torch_xla.runtime" in src
         assert "global_ordinal" in src and "world_size" in src
+
+
+class TestHbmBudget:
+    """Day-1 finding #7 (the REAL cause of the first OOM, discovered after
+    the world-size fix): fp32 softmax materializes [B*H, T, T] per layer and
+    the backward pass keeps ALL layers' buffers alive. At b=16, T=2048, H=16:
+    4 GB x 12 layers = 48 GB >> 15.75 GB HBM - the config could never fit,
+    on any runtime. Measured: 'Used 68.25G of 15.75G hbm', twelve
+    f32[256,2048,2048] allocations."""
+
+    HBM_BYTES = 15.75 * 2**30
+    # Leave headroom for params+optimizer (~2.5 GB at 200m) and XLA temps.
+    ATTN_BUDGET = 10.0 * 2**30
+
+    @staticmethod
+    def _attn_bytes(cfg):
+        m = cfg["model"]
+        b = int(cfg["batch_size_per_device"])
+        # fp32 softmax buffer per layer, all layers live during backward.
+        return int(m["n_layer"]) * b * int(m["n_head"]) * int(m["block_size"]) ** 2 * 4
+
+    def test_tpu_v3_configs_fit_hbm(self):
+        import glob as _glob, json as _json
+        pats = ("kaggle_*.json", "200m_*.json", "tpu3_200m_*.json")
+        checked = 0
+        for pat in pats:
+            for p in sorted(_glob.glob(os.path.join(ROOT, "configs", pat))):
+                cfg = _json.load(open(p))
+                got = self._attn_bytes(cfg)
+                assert got <= self.ATTN_BUDGET, (
+                    f"{os.path.basename(p)}: fp32-softmax residency "
+                    f"{got/2**30:.1f} GB > {self.ATTN_BUDGET/2**30:.1f} GB budget "
+                    f"(HBM 15.75). Lower batch_size_per_device, raise grad_accum.")
+                checked += 1
+        assert checked >= 20
+
+    def test_tokens_per_update_invariant_preserved(self):
+        """The OOM fix (b 16->2, accum 1->8) must NOT change the optimization
+        trajectory: tokens/update stays 262,144 for every 8-core 200m config."""
+        import glob as _glob, json as _json
+        pats = ("kaggle_*.json", "200m_*.json", "tpu3_200m_*.json")
+        for pat in pats:
+            for p in sorted(_glob.glob(os.path.join(ROOT, "configs", pat))):
+                cfg = _json.load(open(p))
+                tpu = (int(cfg["batch_size_per_device"]) * 8
+                       * int(cfg["model"]["block_size"]) * int(cfg["grad_accum"]))
+                assert tpu == 262144, f"{os.path.basename(p)}: tokens/update {tpu}"
+
+    def test_grad_accum_preserves_update_math(self):
+        """The HBM fix changes b16/accum1 -> b2/accum8. This must be the SAME
+        optimization step: sum of (loss/accum).backward() over 8 microbatches
+        equals one full-batch backward (fp32, linearity of gradients).
+        Measured on this repo's GPT: max weight diff 3.7e-09 after 1 update."""
+        import torch as _t
+        from src.model import GPT, GPTConfig
+        cfg = GPTConfig(block_size=32, vocab_size=256, n_layer=1, n_head=2,
+                        n_embd=32, gradient_checkpointing=False)
+
+        def one_update(accum):
+            _t.manual_seed(0)
+            m = GPT(cfg)
+            opt = _t.optim.SGD(m.parameters(), lr=0.1)
+            _t.manual_seed(42)
+            X = _t.randint(0, 256, (16, 32))
+            Y = _t.randint(0, 256, (16, 32))
+            opt.zero_grad()
+            mb = 16 // accum
+            for i in range(accum):
+                _, loss = m(X[i * mb:(i + 1) * mb], Y[i * mb:(i + 1) * mb])
+                (loss / accum).backward()
+            opt.step()
+            return _t.cat([p.detach().flatten() for p in m.parameters()])
+
+        diff = (one_update(1) - one_update(8)).abs().max().item()
+        assert diff < 1e-5, f"accum changed the update: max weight diff {diff}"
