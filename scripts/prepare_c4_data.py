@@ -37,7 +37,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Optional
 
 import numpy as np
 

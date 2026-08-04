@@ -745,3 +745,114 @@ class TestCausalPatch:
         bad = dict(bs); bad.pop(next(iter(bad)))
         with _pytest.raises(ValueError, match="not a sterile pair"):
             cp.build_franken(bad, hs, 32, "qk")
+
+    def test_probe_keys_not_double_prefixed(self):
+        """v1 wrote distractor_distractor_induction (re-prefixed keys that
+        already carried the prefix) - the H5 JSON would have silently missed
+        the pre-registered metric names."""
+        cp, bs, hs = self._pair()
+        m = GPT(GPTConfig(**self.KW))
+        m.load_state_dict(hs, strict=True)
+        out = cp.probe(m.eval(), batch_size=2)
+        assert "distractor_distractor_induction" not in out
+        assert "distractor_induction" in out or "distractor_error" in out
+
+    def test_gap_closure_guard_small_gap(self):
+        """closure = (fr-b)/(hla-b) on a near-zero gap manufactures arbitrary
+        percentages; the guard must refuse (NaN + flag), never divide."""
+        cp, _, _ = self._pair()
+        base = {"induction": 0.5000}
+        hla = {"induction": 0.5000 + 1e-6}   # below MIN_MEANINGFUL_GAP
+        fr = {"induction": 0.9}
+        rec = cp.gap_closure(base, hla, fr)["induction"]
+        assert rec["closure"] != rec["closure"]          # NaN
+        assert rec.get("closure_note") == 1.0
+
+    def test_gap_closure_math(self):
+        cp, _, _ = self._pair()
+        base = {"induction": 0.10, "induction_std": 0.0}
+        hla = {"induction": 0.30, "induction_std": 0.0}
+        fr = {"induction": 0.25, "induction_std": 0.0}
+        rec = cp.gap_closure(base, hla, fr)["induction"]
+        assert abs(rec["closure"] - 0.75) < 1e-9         # (0.25-0.10)/(0.30-0.10)
+        assert rec["closure_std_bound"] == 0.0
+
+    def test_probe_multi_reports_std(self):
+        cp, bs, hs = self._pair()
+        m = GPT(GPTConfig(**self.KW))
+        m.load_state_dict(hs, strict=True)
+        out = cp.probe_multi(m.eval(), seeds=(1, 2), batch_size=2)
+        assert "induction" in out and "induction_std" in out
+        assert out["induction_std"] >= 0.0
+
+
+class TestAttentionNeedleSNR:
+    """Diff-Transformer-lesson metric (their Table 3 'attention noise'):
+    activation-level SNR of retrieval. The Oral-tier reading of our
+    salience/gate claim needs a direct 'where does attention LOOK' number,
+    not only P(B) probes."""
+
+    KW = dict(block_size=256, vocab_size=50257, n_layer=2, n_head=2,
+              n_embd=64, gradient_checkpointing=False)
+
+    def test_snr_near_one_at_random_init(self):
+        from src.eval import attention_needle_snr
+        torch.manual_seed(0)
+        m = GPT(GPTConfig(**self.KW)).eval()
+        out = attention_needle_snr(m)
+        assert 0.3 < out["snr_needle_last"] < 3.0, (
+            "random init has no needle preference; SNR must be ~1 "
+            f"(got {out['snr_needle_last']})")
+        assert out["snr_needle_best"] >= out["snr_needle_last"] - 1e-9
+
+    def test_snr_nan_on_tiny_vocab(self):
+        import math
+        from src.eval import attention_needle_snr
+        c = GPTConfig(block_size=64, vocab_size=32, n_layer=1, n_head=2,
+                      n_embd=32, gradient_checkpointing=False)
+        out = attention_needle_snr(GPT(c).eval())
+        assert math.isnan(out["snr_needle_last"])
+
+    def test_snr_restores_model_state(self):
+        """Probe is side-effect-free like every other probe (tested class
+        invariant): diagnostics flags and training mode restored."""
+        from src.eval import attention_needle_snr
+        m = GPT(GPTConfig(**self.KW))
+        m.train()
+        attention_needle_snr(m)
+        assert m.training
+        assert not m.transformer.h[0].attn.capture_diagnostics
+        assert not m.transformer.h[0].attn.capture_attention
+
+    def test_snr_detects_planted_signal(self):
+        """Ground-truth: a model FORCED to attend at the needle must show
+        SNR >> 1 - the metric must actually move when the behavior exists."""
+        from src.eval import attention_needle_snr
+        torch.manual_seed(0)
+        m = GPT(GPTConfig(**self.KW)).eval()
+        base = attention_needle_snr(m)["snr_needle_last"]
+        # Craft attention artificially: huge salience toward needle tokens is
+        # impractical to force directly; instead verify metric monotonicity
+        # via a synthetic attention override on the last block.
+        blk = m.transformer.h[-1].attn
+        orig = blk.forward
+        import types as _t
+
+        def fake_forward(self, x):
+            out = orig(x)
+            if self.capture_attention and self.last_attn is not None:
+                att = self.last_attn.clone()
+                T = att.shape[-1]
+                pos_ab = T // 3
+                att[:, :, T - 2, :] = 1e-6
+                att[:, :, T - 2, pos_ab] = 0.5
+                att[:, :, T - 2, pos_ab + 1] = 0.5
+                self.last_attn = att
+            return out
+
+        blk.forward = _t.MethodType(fake_forward, blk)
+        boosted = attention_needle_snr(m)["snr_needle_last"]
+        blk.forward = orig
+        assert boosted > 100 * max(base, 1e-9), (
+            f"metric must saturate when attention IS on the needle "
+            f"(base={base:.3f}, boosted={boosted:.3f})")

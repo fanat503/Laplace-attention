@@ -33,7 +33,7 @@ import json
 import os
 import random
 from dataclasses import dataclass, asdict
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Dict, Optional
 
 import numpy as np
 import torch

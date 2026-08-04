@@ -8,10 +8,7 @@ from __future__ import annotations
 
 import argparse
 import ast
-import os
-import sys
 from pathlib import Path
-from typing import Iterable, List
 
 ROOT = Path(__file__).resolve().parents[1]
 

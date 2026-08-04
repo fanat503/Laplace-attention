@@ -24,7 +24,6 @@ Usage:
     python scripts/prepare_data.py --output /tmp/test.bin --tokens 1000000
 """
 import os
-import sys
 import json
 import hashlib
 import argparse
@@ -70,7 +69,7 @@ def download_and_tokenize(
     json_path = output_path.with_suffix(output_path.suffix + ".json")
 
     # Tokenizer.
-    print(f"Loading GPT-2 tokenizer...")
+    print("Loading GPT-2 tokenizer...")
     enc = tiktoken.get_encoding("gpt2")
     eot_token = enc.eot_token
     vocab_size = enc.n_vocab
@@ -153,7 +152,7 @@ def download_and_tokenize(
         json.dump(metadata, f, indent=2, sort_keys=True)
     os.replace(tmp_json, json_path)
 
-    print(f"\nDone!")
+    print("\nDone!")
     print(f"  Output: {output_path}")
     print(f"  Tokens: {token_count:,}")
     print(f"  Examples: {example_count:,}")
@@ -221,7 +220,7 @@ def main():
 
     # Print final summary.
     print("\n" + "=" * 60)
-    print(f"Summary:")
+    print("Summary:")
     for k, v in metadata.items():
         print(f"  {k}: {v}")
     print("=" * 60)

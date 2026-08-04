@@ -915,6 +915,71 @@ def prefix_matching_score(model, device="cpu", seed: int = 42, batch_size: int =
         model.train(was_training)
 
 
+@torch.no_grad()
+def attention_needle_snr(model, device="cpu", seed: int = 42,
+                         batch_size: int = 4) -> Dict[str, float]:
+    """Attention signal-to-noise on the induction task (Diff-Transformer-style
+    Table-3 readout, adapted to our probe framework).
+
+    Plant [A][B] in random filler, query with the second [A] at T-2, capture
+    attention (diagnostics forward), and read WHERE the final-layer heads look
+    from the query position:
+
+      snr_needle = attn_mass(needle pair) / attn_mass(mean filler token)
+
+    ~1 at random init (no preference, calibration-tested); >>1 after training
+    means retrieval concentrates on the target - the direct activation-level
+    quantification of the "suppress irrelevant keys" claim (salience/gates).
+    Reported per last layer (retrieval heads live late) plus best over layers,
+    so the paper figure does not depend on a single-layer choice.
+    NaN for tiny vocabs (needs the induction token block), like the probes.
+    """
+    was_training = model.training
+    prev_diag = bool(model.transformer.h[0].attn.capture_diagnostics)
+    prev_attn = bool(model.transformer.h[0].attn.capture_attention)
+    model.eval()
+    model.set_diagnostics(enabled=True, capture_attention=True)
+    try:
+        T = min(256, model.config.block_size)
+        if T < 16 or model.config.vocab_size < INDUCTION_TOK_B_OFFSET + batch_size:
+            return {"snr_needle_last": float("nan"), "snr_needle_best": float("nan")}
+        g = torch.Generator(device="cpu")
+        g.manual_seed(seed)
+        lo = INDUCTION_TOK_B_OFFSET + batch_size
+        tokens = torch.randint(lo, model.config.vocab_size,
+                               (batch_size, T), generator=g)
+        i = torch.arange(batch_size)
+        pos_ab = T // 3
+        tokens[:, pos_ab] = INDUCTION_TOK_A_OFFSET + i
+        tokens[:, pos_ab + 1] = INDUCTION_TOK_B_OFFSET + i
+        q_pos = T - 2
+        tokens[:, q_pos] = INDUCTION_TOK_A_OFFSET + i
+        model(tokens.to(device))
+
+        eps = 1e-12
+        per_layer = []
+        for block in model.transformer.h:
+            att = getattr(block.attn, "last_attn", None)
+            if att is None:
+                continue
+            att = att.detach().float()               # (B, H, Tq, Tk)
+            row = att[:, :, q_pos, :]                # (B, H, Tk)
+            needle = row[:, :, pos_ab:pos_ab + 2].sum(-1) / 2.0
+            mask = torch.ones(row.shape[-1], dtype=torch.bool)
+            mask[pos_ab:pos_ab + 2] = False
+            mask[q_pos:] = False                     # exclude self/future
+            filler = row[:, :, mask].mean(-1)
+            snr = (needle / filler.clamp_min(eps)).mean()
+            per_layer.append(float(snr))
+        if not per_layer:
+            return {"snr_needle_last": float("nan"), "snr_needle_best": float("nan")}
+        return {"snr_needle_last": per_layer[-1],
+                "snr_needle_best": float(max(per_layer))}
+    finally:
+        model.set_diagnostics(enabled=prev_diag, capture_attention=prev_attn)
+        model.train(was_training)
+
+
 __all__ = [
     "evaluate_induction",
     "evaluate_distractor_induction",
@@ -931,5 +996,6 @@ __all__ = [
     "mechanism_knockout",
     "gate_redundancy_statistics",
     "positional_recall_curve",
+    "attention_needle_snr",
     "prefix_matching_score",
 ]

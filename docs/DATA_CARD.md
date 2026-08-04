@@ -7,6 +7,24 @@
   (`raw_token_bin_v1`), different datatypes.
 - Splits: disjoint train/val files (verified by `scripts/validate_data_pair.py`).
 
+## Produced dataset (pinned, 2026-07 Kaggle preparation)
+
+The experiments' actual token set (private Kaggle dataset `hla-c4-tokens`):
+
+| Field | Value |
+|---|---|
+| num_tokens (train) | 4,700,000,000 |
+| val tokens | 20,000,000 |
+| documents_consumed | 9,827,237 |
+| tokenizer_backend | gigatoken (bit-identical to tiktoken gpt2, gated) |
+| special_literal_fallback_docs | 0 |
+| content_sha256_stream | `4edd8fa4fdc94f67dabb7d2662d76904a7fd8128d696c285f2676ac381925441` |
+| C4 revision (pinned) | `1588ec454efa1a09f29cd18ddd04fe05fc8653a2` |
+
+Any re-preparation is interchangeable iff `content_sha256_stream` matches.
+Larger sets (e.g. 28B for 700m runs) are bit-exact SUPERSETS: the C4 stream
+is deterministic under the pinned revision, so this 4.7B set is a prefix.
+
 ## Known limitations & risks
 - C4 contains web text with quality issues; this project
   uses it for relative architecture comparison, not for deployable model

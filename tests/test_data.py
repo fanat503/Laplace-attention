@@ -158,7 +158,7 @@ class TestTokenizerBackends:
         """The batched writer must produce the same stream as the old
         per-document loop: verify against a manual reference encoding."""
         prep = self._prep()
-        import tiktoken, hashlib
+        import tiktoken
         import numpy as np
         corpus = self._corpus()
         enc = tiktoken.get_encoding("gpt2")
@@ -178,10 +178,9 @@ class TestTokenizerBackends:
         assert np.array_equal(got, ref), "batched writer changed the token stream"
 
     def test_backends_bit_identical(self, tmp_path):
-        import pytest as _pytest
         prep = self._prep()
         if prep._gigatoken is None:
-            _pytest.skip("gigatoken not installed")
+            pytest.skip("gigatoken not installed")
         import hashlib
         corpus = self._corpus()
         outs = {}
@@ -220,7 +219,6 @@ class TestTokenizerBackends:
         text), on every backend. The gigatoken compat layer refuses such
         documents, so the encoder must route them to reference tiktoken -
         verified here against a manually built legacy stream."""
-        import pytest as _pytest
         prep = self._prep()
         import tiktoken
         import numpy as np

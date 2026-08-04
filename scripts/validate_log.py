@@ -17,7 +17,10 @@ def parse_float(x: str) -> float:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("csv_path")
-    ap.add_argument("--allow-nan-val", action="store_true")
+    ap.add_argument("--allow-nan-val", action="store_true",
+                    help="legacy no-op (nan val on non-eval rows is now the default contract)")
+    ap.add_argument("--require-val-every-row", action="store_true",
+                    help="strict mode: every CSV row must carry a finite val_loss")
     args = ap.parse_args()
 
     path = Path(args.csv_path)
@@ -41,6 +44,7 @@ def main() -> None:
 
     prev_step = -1
     prev_tokens = -1
+    n_finite_val = 0
     for i, r in enumerate(rows):
         step = int(r["step"])
         tokens = int(r["tokens_seen"])
@@ -53,9 +57,22 @@ def main() -> None:
         if not math.isfinite(train_loss):
             raise RuntimeError(f"non-finite train_loss at row {i}: {r['train_loss']}")
         val_loss = parse_float(r.get("val_loss", "nan"))
-        if not args.allow_nan_val and not math.isfinite(val_loss):
+        # Contract fix (pre-pilot audit): the trainer logs every `log_every`
+        # steps but evaluates every `val_every` steps, so nan val_loss on
+        # non-eval rows is NORMAL (a real pilot log has ~4 nan rows per eval
+        # row). The old default rejected every real log. Now: nan rows are
+        # fine, but every PRESENT val_loss must be finite, and at least one
+        # eval row must exist.
+        if math.isfinite(val_loss):
+            n_finite_val += 1
+        elif r.get("val_loss", "") not in ("", "nan", "NaN"):
             raise RuntimeError(f"non-finite val_loss at row {i}: {r.get('val_loss')}")
-    print(f"LOG VALID: rows={len(rows)} final_step={prev_step} final_tokens={prev_tokens}")
+        elif args.require_val_every_row:
+            raise RuntimeError(f"missing val_loss at row {i} (strict mode)")
+    if n_finite_val == 0:
+        raise RuntimeError("no finite val_loss anywhere - eval never ran")
+    print(f"LOG VALID: rows={len(rows)} eval_rows={n_finite_val} "
+          f"final_step={prev_step} final_tokens={prev_tokens}")
 
 
 if __name__ == "__main__":

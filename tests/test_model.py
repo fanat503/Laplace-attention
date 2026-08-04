@@ -423,7 +423,6 @@ class TestLayerDependentPhase:
 
     def test_depth_scales_phase(self):
         """Layer 0 keeps budget = pi*phase_mult; deepest layer gets ~2x."""
-        import math as _m
         model = GPT(small_cfg(**self.KW, n_layer=4, layer_dependent_phase=True)).eval()
         model.set_diagnostics(enabled=True)
         with torch.no_grad():
