@@ -1,0 +1,1131 @@
+diff --git a/CITATION.cff b/CITATION.cff
+index 80babd0..7a2fcef 100644
+--- a/CITATION.cff
++++ b/CITATION.cff
+@@ -16,5 +16,5 @@ keywords:
+   - attention mechanism
+   - language model
+   - interpretability
+-version: "5.4"
++version: "6.0"
+ date-released: "2026-07-06"
+diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
+index d91f520..112b274 100644
+--- a/CONTRIBUTING.md
++++ b/CONTRIBUTING.md
+@@ -2,7 +2,7 @@
+ 
+ ## Ground rules (they exist for scientific validity, not bureaucracy)
+ 
+-1. **No commit without green tests.** `python -m pytest tests/ -q -W error::UserWarning` must print `301 passed` (or more) before any push. CI enforces this, but run locally first.
++1. **No commit without green tests.** `python -m pytest tests/ -q -W error::UserWarning` must print `316 passed` (or more) before any push. CI enforces this, but run locally first.
+ 2. **Sterility is inviolable.** Any change touching `src/model.py`, `src/make_init.py`, config pairs, or the sampler must keep the identity/parameter-matching/data-order invariants (see `docs/STERILITY.md`). The relevant tests (`test_theory.py::TestTheorem1Identity`, `TestSterility`, `test_make_init.py`) are the gate.
+ 3. **New mechanisms follow the pattern**: identity-initialized (zero params ⇒ exact no-op, add to `reset_hla_identity` + `hla_identity_error` + `HLA_KEY_PATTERNS` + `HLA_NODECAY_MARKERS`), always-created for parameter matching, alpha-gated, clamped, with saturation diagnostics, an SDPA guard if it biases scores, and tests for identity/causality/gradient-flow/clip.
+ 4. **Configs change via the validators.** `validate_configs.py` (pair discipline) and `audit_config_values.py` (numeric sanity) must pass; new allowed diffs require justification in the PR description.
+diff --git a/README.md b/README.md
+index 75fdc79..c116675 100644
+--- a/README.md
++++ b/README.md
+@@ -10,9 +10,11 @@ Every attention head does two jobs with one set of vectors: retrieval and transm
+ 
+ This repository has:
+ 
+-1. The mechanism ([`src/model.py`](src/model.py));
+-2. A sterile comparison;
+-3. Metrics ([`docs/METRICS.md`](docs/METRICS.md)).
++1. The mechanism — one modified attention equation ([`src/model.py`](src/model.py), single file);
++2. A sterile comparison: identical data order, init backbone, objective and schedule for base/HLA twins ([`docs/STERILITY.md`](docs/STERILITY.md));
++3. Theory: 9 theorems incl. RoPE-commutation ([`docs/THEORY.md`](docs/THEORY.md));
++4. Pre-registered experiment design H1–H5 ([`docs/EXPERIMENT_CARD.md`](docs/EXPERIMENT_CARD.md));
++5. Every logged metric documented ([`docs/METRICS.md`](docs/METRICS.md)); data provenance pinned by revision + sha256 ([`docs/DATA_CARD.md`](docs/DATA_CARD.md)).
+ 
+ 
+ 
+@@ -21,7 +23,7 @@ This repository has:
+ ```bash
+ git clone https://github.com/fanat503/Laplace-attention.git
+ cd Laplace-attention
+-pip install -r requirements.txt        # yoou can use CPU
++pip install -r requirements.txt        # CPU is enough for tests
+ 
+ python -m pytest tests/ -q      
+ python scripts/audit_sterility.py      
+@@ -36,7 +38,7 @@ python src/make_init.py --shared-backbone \
+     --base-config configs/200m_base_s42.json --hla-config configs/200m_hla_s42.json \
+     --out-base inits/init_200m_base_s42.pt --out-hla inits/init_200m_hla_s42.pt
+ 
+-python scripts/prepare_c4_data.py --train-tokens 5400000000 --val-tokens 20000000 --out-dir data
++python scripts/prepare_c4_data.py --train-tokens 4700000000 --val-tokens 20000000 --out-dir data
+ 
+ python src/train_xla.py --config configs/200m_base_s42.json
+ python src/train_xla.py --config configs/200m_hla_s42.json
+@@ -51,4 +53,4 @@ python scripts/make_ablation_configs.py \
+ 
+ If you use this code, please cite it via [`CITATION.cff`](CITATION.cff).
+ 
+-**Apache-2.0**
++**Apache-2.0** · Independent research; replications and compute support welcome — open an issue.
+diff --git a/docs/DATA_CARD.md b/docs/DATA_CARD.md
+index d619899..6863c48 100644
+--- a/docs/DATA_CARD.md
++++ b/docs/DATA_CARD.md
+@@ -7,6 +7,24 @@
+   (`raw_token_bin_v1`), different datatypes.
+ - Splits: disjoint train/val files (verified by `scripts/validate_data_pair.py`).
+ 
++## Produced dataset (pinned, 2026-07 Kaggle preparation)
++
++The experiments' actual token set (private Kaggle dataset `hla-c4-tokens`):
++
++| Field | Value |
++|---|---|
++| num_tokens (train) | 4,700,000,000 |
++| val tokens | 20,000,000 |
++| documents_consumed | 9,827,237 |
++| tokenizer_backend | gigatoken (bit-identical to tiktoken gpt2, gated) |
++| special_literal_fallback_docs | 0 |
++| content_sha256_stream | `4edd8fa4fdc94f67dabb7d2662d76904a7fd8128d696c285f2676ac381925441` |
++| C4 revision (pinned) | `1588ec454efa1a09f29cd18ddd04fe05fc8653a2` |
++
++Any re-preparation is interchangeable iff `content_sha256_stream` matches.
++Larger sets (e.g. 28B for 700m runs) are bit-exact SUPERSETS: the C4 stream
++is deterministic under the pinned revision, so this 4.7B set is a prefix.
++
+ ## Known limitations & risks
+ - C4 contains web text with quality issues; this project
+   uses it for relative architecture comparison, not for deployable model
+diff --git a/docs/METRICS.md b/docs/METRICS.md
+index 3144325..9fe0fde 100644
+--- a/docs/METRICS.md
++++ b/docs/METRICS.md
+@@ -243,6 +243,24 @@ Unlike the other §10 probes this one IS captured during training (at the
+ model, but reviewers will ask *when* the flattening emerges — a
+ final-checkpoint number cannot answer that; a trajectory can.
+ 
++### `attention_needle_snr(model)`
++
++Activation-level retrieval signal-to-noise (adapted from Diff Transformer's
++attention-noise analysis, Ye et al. 2025): plant the [A][B] needle pair in
++filler, query with the second [A], capture attention on the diagnostics
++forward, and report
++
++`snr_needle = attn_mass(needle) / attn_mass(mean filler token)`
++
++from the query row: `snr_needle_last` (final layer; retrieval heads
++concentrate late) and `snr_needle_best` (max over layers). Calibrated ~1.0
++at random init (measured 1.010; no preference), >>1 when retrieval
++concentrates on the target. This is the direct "where does attention look"
++counterpart of the P(B)-based probes: P(B) can improve via V-path changes,
++snr_needle moves ONLY if the score geometry itself concentrates - exactly
++the H5 retrieval-geometry claim, measured in activations. NaN for tiny
++vocabs (deliberate, like the other probes).
++
+ ### `attention_head_similarity(model)`
+ 
+ Mean pairwise Jensen–Shannon divergence between per-head attention
+diff --git a/pyproject.toml b/pyproject.toml
+index 8f7bc97..d966e28 100644
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -1,6 +1,6 @@
+ [project]
+ name = "hla"
+-version = "5.4.0"
++version = "6.0.0"
+ description = "Holographic Laplace Attention: decoupling retrieval from content transmission in softmax attention, with a sterile comparison harness"
+ # NOTE: no `readme` key on purpose - the README lives at the repository root,
+ # one level above this package dir, and setuptools cannot reference ../ paths.
+diff --git a/scripts/analyze_checkpoint.py b/scripts/analyze_checkpoint.py
+index ea871bd..fe3d8e6 100644
+--- a/scripts/analyze_checkpoint.py
++++ b/scripts/analyze_checkpoint.py
+@@ -22,7 +22,6 @@ import os
+ import sys
+ from typing import Any, Dict, List
+ 
+-import numpy as np
+ import torch
+ import torch.nn.functional as F
+ 
+diff --git a/scripts/analyze_subspaces.py b/scripts/analyze_subspaces.py
+index 0375c35..5b3f875 100644
+--- a/scripts/analyze_subspaces.py
++++ b/scripts/analyze_subspaces.py
+@@ -18,7 +18,7 @@ import argparse
+ import json
+ import os
+ import sys
+-from typing import Any, Dict, Tuple
++from typing import Any, Dict
+ 
+ import torch
+ 
+diff --git a/scripts/audit_sterility.py b/scripts/audit_sterility.py
+index 8138ade..528bb88 100644
+--- a/scripts/audit_sterility.py
++++ b/scripts/audit_sterility.py
+@@ -8,10 +8,7 @@ from __future__ import annotations
+ 
+ import argparse
+ import ast
+-import os
+-import sys
+ from pathlib import Path
+-from typing import Iterable, List
+ 
+ ROOT = Path(__file__).resolve().parents[1]
+ 
+diff --git a/scripts/causal_patch.py b/scripts/causal_patch.py
+index c072505..df8d76f 100644
+--- a/scripts/causal_patch.py
++++ b/scripts/causal_patch.py
+@@ -104,22 +104,89 @@ def build_franken(base_state: Dict[str, torch.Tensor],
+     return out
+ 
+ 
+-def probe(model: GPT, device: str = "cpu") -> Dict[str, float]:
++def probe(model: GPT, device: str = "cpu", seed: int = 42,
++          batch_size: int = 8) -> Dict[str, float]:
+     out: Dict[str, float] = {}
+-    out["induction"] = float(evaluate_induction(model, device=device, batch_size=8))
++    out["induction"] = float(evaluate_induction(
++        model, device=device, seed=seed, batch_size=batch_size))
+     try:
+-        d = evaluate_distractor_induction(model, device=device, batch_size=8)
+-        out.update({f"distractor_{k}": float(v) for k, v in d.items()})
++        d = evaluate_distractor_induction(
++            model, device=device, seed=seed, batch_size=batch_size)
++        # Keys already carry the distractor_ prefix - do NOT re-prefix
++        # (v1 wrote distractor_distractor_induction; regression-tested now).
++        out.update({str(k): float(v) for k, v in d.items()})
+     except Exception as e:
+         out["distractor_error"] = str(e)  # type: ignore[assignment]
+     try:
+         out.update({f"posrec_{k}": float(v)
+-                    for k, v in positional_recall_curve(model, device=device, batch_size=4).items()})
++                    for k, v in positional_recall_curve(
++                        model, device=device, seed=seed,
++                        batch_size=max(2, batch_size // 2)).items()})
+     except Exception:
+         pass
+     return out
+ 
+ 
++def probe_multi(model: GPT, device: str = "cpu", seeds=(42, 43, 44, 45, 46),
++                batch_size: int = 8) -> Dict[str, float]:
++    """Probe under several seeds -> mean and std per metric.
++
++    The H5 decision number needs an uncertainty: a gap-closure fraction
++    without error bars is exactly the kind of single-number claim Reviewer 2
++    strikes down. Seeds vary the synthetic probe content, not the model.
++    """
++    import statistics
++    per_seed = [probe(model, device=device, seed=s, batch_size=batch_size)
++                for s in seeds]
++    keys = [k for k in per_seed[0]
++            if all(isinstance(r.get(k), float) for r in per_seed)]
++    out: Dict[str, float] = {}
++    for k in keys:
++        vals = [r[k] for r in per_seed if r[k] == r[k]]  # drop NaN
++        if not vals:
++            out[k] = float("nan")
++            out[f"{k}_std"] = float("nan")
++            continue
++        out[k] = float(statistics.fmean(vals))
++        out[f"{k}_std"] = float(statistics.stdev(vals)) if len(vals) > 1 else 0.0
++    return out
++
++
++GAP_METRICS = ("induction", "distractor_induction", "distractor_margin",
++               "posrec_litm_worst_frac")
++# Pre-registered (EXPERIMENT_CARD H5): >50% closure on retrieval probes =>
++# retrieval geometry CAUSES the gain; <20% => story is NOT causal - report so.
++MIN_MEANINGFUL_GAP = 1e-4
++
++
++def gap_closure(base: Dict[str, float], hla: Dict[str, float],
++                franken: Dict[str, float]) -> Dict[str, Dict[str, float]]:
++    """closure = (franken - base) / (hla - base), guarded.
++
++    Guards (each has a test):
++      - |hla-base| < MIN_MEANINGFUL_GAP -> closure undefined (NaN), flagged:
++        dividing by a near-zero gap manufactures arbitrary percentages;
++      - propagated std via first-order bounds from per-metric stds.
++    """
++    out: Dict[str, Dict[str, float]] = {}
++    for m in GAP_METRICS:
++        if m not in base or m not in hla or m not in franken:
++            continue
++        gap = hla[m] - base[m]
++        rec = {"base": base[m], "hla": hla[m], "franken": franken[m],
++               "gap": gap}
++        if not (gap == gap) or abs(gap) < MIN_MEANINGFUL_GAP:
++            rec["closure"] = float("nan")
++            rec["closure_note"] = 1.0  # gap too small to attribute
++        else:
++            rec["closure"] = (franken[m] - base[m]) / gap
++            noise = max(base.get(f"{m}_std", 0.0), hla.get(f"{m}_std", 0.0),
++                        franken.get(f"{m}_std", 0.0))
++            rec["closure_std_bound"] = 3.0 * noise / abs(gap)
++        out[m] = rec
++    return out
++
++
+ def main() -> None:
+     ap = argparse.ArgumentParser(description="Transplant HLA retrieval geometry into the base twin")
+     ap.add_argument("--base-checkpoint", required=True)
+@@ -130,6 +197,9 @@ def main() -> None:
+                     choices=["qk", "phase", "retrieval", "full"])
+     ap.add_argument("--out", required=True)
+     ap.add_argument("--device", default="cpu")
++    ap.add_argument("--probe-seeds", default="42,43,44,45,46",
++                    help="comma-separated probe seeds (error bars for H5)")
++    ap.add_argument("--probe-batch", type=int, default=8)
+     args = ap.parse_args()
+ 
+     cfg = json.load(open(args.hla_config, encoding="utf-8"))["model"]
+@@ -138,16 +208,32 @@ def main() -> None:
+     franken_state = build_franken(base_state, hla_state, int(cfg["n_embd"]), args.transplant)
+ 
+     results: Dict[str, Dict[str, float]] = {}
++    seeds = tuple(int(s) for s in args.probe_seeds.split(","))
+     for name, state in (("base", base_state), ("hla", hla_state), ("franken", franken_state)):
+         model = GPT(GPTConfig(**cfg)).eval()
+         model.load_state_dict(state, strict=True)
+-        results[name] = probe(model, device=args.device)
++        results[name] = probe_multi(model, device=args.device, seeds=seeds,
++                                    batch_size=args.probe_batch)
+         print(f"{name:8s}: " + "  ".join(f"{k}={v:.5f}" for k, v in results[name].items()
+-                                         if isinstance(v, float) and "pos_" not in k))
++                                         if isinstance(v, float) and "pos_" not in k
++                                         and not k.endswith("_std")))
++
++    closure = gap_closure(results["base"], results["hla"], results["franken"])
++    results["gap_closure"] = closure  # type: ignore[assignment]
++    print("\n=== H5 gap closure (pre-registered: >0.50 causal, <0.20 not) ===")
++    for m, rec in closure.items():
++        if rec.get("closure_note"):
++            print(f"  {m:24s}: gap={rec['gap']:+.6f} TOO SMALL to attribute (no claim)")
++        else:
++            print(f"  {m:24s}: closure={rec['closure']:+.3f} "
++                  f"(±{rec.get('closure_std_bound', float('nan')):.3f}) "
++                  f"gap={rec['gap']:+.6f}")
+ 
+     results["meta"] = {"transplant": args.transplant,  # type: ignore[assignment]
+                        "base_checkpoint": args.base_checkpoint,
+-                       "hla_checkpoint": args.hla_checkpoint}
++                       "hla_checkpoint": args.hla_checkpoint,
++                       "probe_seeds": list(seeds),
++                       "probe_batch": args.probe_batch}
+     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+     with open(args.out, "w", encoding="utf-8") as f:
+         json.dump(results, f, indent=2)
+diff --git a/scripts/compare_attention_kl.py b/scripts/compare_attention_kl.py
+index 05d3856..d81303b 100644
+--- a/scripts/compare_attention_kl.py
++++ b/scripts/compare_attention_kl.py
+@@ -12,7 +12,6 @@ import os
+ import sys
+ from typing import Any, Dict
+ 
+-import numpy as np
+ import torch
+ 
+ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+diff --git a/scripts/estimate_budget.py b/scripts/estimate_budget.py
+index 695acc0..4f89730 100644
+--- a/scripts/estimate_budget.py
++++ b/scripts/estimate_budget.py
+@@ -7,7 +7,6 @@ from __future__ import annotations
+ 
+ import argparse
+ import json
+-import math
+ from typing import Any, Dict
+ 
+ 
+diff --git a/scripts/make_ablation_configs.py b/scripts/make_ablation_configs.py
+index 8e9e647..30558af 100644
+--- a/scripts/make_ablation_configs.py
++++ b/scripts/make_ablation_configs.py
+@@ -42,7 +42,6 @@ import argparse
+ import copy
+ import json
+ import os
+-import sys
+ 
+ ZERO_KEYS = {
+     "phase_mult": 0.0,
+diff --git a/scripts/make_paper_figures.py b/scripts/make_paper_figures.py
+new file mode 100644
+index 0000000..c766a6a
+--- /dev/null
++++ b/scripts/make_paper_figures.py
+@@ -0,0 +1,181 @@
++# Copyright 2026 Slyatski Ilya
++# Licensed under the Apache License, Version 2.0
++"""Paper figures: the three plots the paper's argument stands on.
++
++Each figure obeys one rule (Anthropic style): ONE takeaway per figure,
++statable in the caption's first sentence.
++
++  fig1_twin_divergence : val loss, base vs HLA twins (same init/data/steps)
++                         + inset of the gap in std units of seed noise.
++  fig2_litm_curves     : positional recall (pos_10..pos_90) at N checkpoints
++                         - does HLA flatten the U while base keeps sagging?
++  fig3_gap_closure     : H5 causal patching - base / franken / hla bars per
++                         retrieval probe with the pre-registered 50%/20%
++                         thresholds drawn as decision lines.
++
++Inputs are the artifacts training already produces (train_log_*.csv,
++causal JSON from scripts/causal_patch.py). Works on CPU.
++
++    python scripts/make_paper_figures.py --base-log runs/b/train_log_b.csv \
++        --hla-log runs/h/train_log_h.csv --causal-json runs/causal.json \
++        --out-dir figures/
++"""
++from __future__ import annotations
++
++import argparse
++import csv
++import json
++import math
++import os
++from typing import Dict, List
++
++
++def require_matplotlib():
++    import matplotlib
++    matplotlib.use("Agg")
++    import matplotlib.pyplot as plt
++    plt.rcParams.update({
++        "figure.dpi": 150, "savefig.dpi": 300, "savefig.bbox": "tight",
++        "font.size": 9, "axes.spines.top": False, "axes.spines.right": False,
++        "axes.grid": True, "grid.alpha": 0.25, "legend.frameon": False,
++    })
++    return plt
++
++
++BASE_COLOR, HLA_COLOR, FRANKEN_COLOR = "#606060", "#B0413E", "#3E6FB0"
++
++
++def read_log(path: str) -> Dict[str, List[float]]:
++    rows = []
++    with open(path, encoding="utf-8") as f:
++        for row in csv.reader(f):
++            if row and row[0] and not row[0].startswith("#"):
++                rows.append(row)
++    header, data = rows[0], rows[1:]
++    out: Dict[str, List[float]] = {k: [] for k in header}
++    for r in data:
++        for k, v in zip(header, r):
++            try:
++                out[k].append(float(v))
++            except ValueError:
++                out[k].append(float("nan"))
++    return out
++
++
++def fig1_twin_divergence(base_log, hla_log, out, seed_std: float = 0.0):
++    plt = require_matplotlib()
++    b, h = read_log(base_log), read_log(hla_log)
++    fig, ax = plt.subplots(figsize=(4.2, 3.0))
++    for log, name, color in ((b, "base", BASE_COLOR), (h, "HLA", HLA_COLOR)):
++        xs = [t for t, v in zip(log["tokens_seen"], log["val_loss"])
++              if not math.isnan(v)]
++        ys = [v for v in log["val_loss"] if not math.isnan(v)]
++        ax.plot(xs, ys, label=name, color=color, lw=1.4)
++    ax.set_xlabel("tokens seen")
++    ax.set_ylabel("val loss")
++    ax.legend()
++    # Inset: the actual decision quantity - gap in units of seed noise.
++    if seed_std > 0:
++        bx = {t: v for t, v in zip(b["tokens_seen"], b["val_loss"]) if not math.isnan(v)}
++        hx = {t: v for t, v in zip(h["tokens_seen"], h["val_loss"]) if not math.isnan(v)}
++        common = sorted(set(bx) & set(hx))
++        if common:
++            ia = ax.inset_axes([0.55, 0.55, 0.42, 0.4])
++            ia.plot(common, [(bx[t] - hx[t]) / seed_std for t in common],
++                    color=HLA_COLOR, lw=1.2)
++            ia.axhline(0, color="k", lw=0.6)
++            ia.set_title("gap / seed σ", fontsize=7)
++            ia.tick_params(labelsize=6)
++    fig.savefig(out)
++    plt.close(fig)
++    print(f"wrote {out}")
++
++
++def fig2_litm_curves(base_log, hla_log, out, n_checkpoints: int = 3):
++    plt = require_matplotlib()
++    cols = ["pos_10", "pos_30", "pos_50", "pos_70", "pos_90"]
++    depths = [10, 30, 50, 70, 90]
++    b, h = read_log(base_log), read_log(hla_log)
++    if "pos_10" not in b or all(math.isnan(v) for v in b["pos_10"]):
++        raise SystemExit("no LITM columns in logs (need svd_every cadence rows)")
++    fig, axes = plt.subplots(1, n_checkpoints, figsize=(3.0 * n_checkpoints, 2.6),
++                             sharey=True)
++    for log, name, color in ((b, "base", BASE_COLOR), (h, "HLA", HLA_COLOR)):
++        idx = [i for i, v in enumerate(log["pos_10"]) if not math.isnan(v)]
++        picks = [idx[round(j * (len(idx) - 1) / (n_checkpoints - 1))]
++                 for j in range(n_checkpoints)] if len(idx) >= n_checkpoints else idx
++        for ax, i in zip(axes, picks):
++            ax.plot(depths, [log[c][i] for c in cols], "o-", ms=3, lw=1.2,
++                    label=name, color=color)
++            ax.set_title(f"{log['tokens_seen'][i]:,.0f} tokens", fontsize=8)
++            ax.set_xlabel("needle depth (%)")
++    axes[0].set_ylabel("P(needle)")
++    axes[0].legend(fontsize=8)
++    fig.savefig(out)
++    plt.close(fig)
++    print(f"wrote {out}")
++
++
++def fig3_gap_closure(causal_json, out):
++    plt = require_matplotlib()
++    res = json.load(open(causal_json, encoding="utf-8"))
++    gc = res.get("gap_closure")
++    if not gc:
++        raise SystemExit("causal JSON has no gap_closure block (rerun causal_patch.py)")
++    metrics = [m for m, r in gc.items() if not r.get("closure_note")]
++    if not metrics:
++        raise SystemExit("all gaps flagged too-small - nothing to plot honestly")
++    fig, axes = plt.subplots(1, len(metrics), figsize=(2.9 * len(metrics), 3.2),
++                             sharey=False)
++    if len(metrics) == 1:
++        axes = [axes]
++    for ax, m in zip(axes, metrics):
++        r = gc[m]
++        names = ["base", "franken", "HLA"]
++        vals = [r["base"], r["franken"], r["hla"]]
++        colors = [BASE_COLOR, FRANKEN_COLOR, HLA_COLOR]
++        ax.bar(names, vals, color=colors, width=0.62)
++        # Pre-registered decision lines on the base->hla span
++        for frac, style in ((0.2, ":"), (0.5, "--")):
++            ax.axhline(r["base"] + frac * r["gap"], color="k", ls=style, lw=0.8)
++        ax.set_title(f"{m}\nclosure={r['closure']:.2f}"
++                     + (f" ±{r['closure_std_bound']:.2f}" if "closure_std_bound" in r else ""),
++                     fontsize=8)
++        ax.tick_params(axis="x", labelsize=7)
++    fig.suptitle("H5 causal patching: does retrieval geometry carry the gain?",
++                 fontsize=9, y=1.04)
++    fig.tight_layout()
++    fig.savefig(out)
++    plt.close(fig)
++    print(f"wrote {out}")
++
++
++def main() -> None:
++    ap = argparse.ArgumentParser(description="Paper-grade figures from run artifacts")
++    ap.add_argument("--base-log")
++    ap.add_argument("--hla-log")
++    ap.add_argument("--causal-json")
++    ap.add_argument("--seed-std", type=float, default=0.0,
++                    help="val-loss std across seeds (for the gap inset)")
++    ap.add_argument("--out-dir", required=True)
++    args = ap.parse_args()
++    os.makedirs(args.out_dir, exist_ok=True)
++    if args.base_log and args.hla_log:
++        fig1_twin_divergence(args.base_log, args.hla_log,
++                             os.path.join(args.out_dir, "fig1_twin_divergence.png"),
++                             seed_std=args.seed_std)
++        try:
++            fig2_litm_curves(args.base_log, args.hla_log,
++                             os.path.join(args.out_dir, "fig2_litm_curves.png"))
++        except SystemExit as e:
++            print(f"[skip fig2] {e}")
++    if args.causal_json:
++        try:
++            fig3_gap_closure(args.causal_json,
++                             os.path.join(args.out_dir, "fig3_gap_closure.png"))
++        except SystemExit as e:
++            print(f"[skip fig3] {e}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/prepare_c4_data.py b/scripts/prepare_c4_data.py
+index 1eaa252..1afd441 100644
+--- a/scripts/prepare_c4_data.py
++++ b/scripts/prepare_c4_data.py
+@@ -37,7 +37,7 @@ import json
+ import os
+ import time
+ from pathlib import Path
+-from typing import Any, Dict, Iterable, Optional
++from typing import Any, Dict, Optional
+ 
+ import numpy as np
+ 
+diff --git a/scripts/prepare_data.py b/scripts/prepare_data.py
+index 1903c3c..12ccdcd 100644
+--- a/scripts/prepare_data.py
++++ b/scripts/prepare_data.py
+@@ -24,7 +24,6 @@ Usage:
+     python scripts/prepare_data.py --output /tmp/test.bin --tokens 1000000
+ """
+ import os
+-import sys
+ import json
+ import hashlib
+ import argparse
+@@ -70,7 +69,7 @@ def download_and_tokenize(
+     json_path = output_path.with_suffix(output_path.suffix + ".json")
+ 
+     # Tokenizer.
+-    print(f"Loading GPT-2 tokenizer...")
++    print("Loading GPT-2 tokenizer...")
+     enc = tiktoken.get_encoding("gpt2")
+     eot_token = enc.eot_token
+     vocab_size = enc.n_vocab
+@@ -153,7 +152,7 @@ def download_and_tokenize(
+         json.dump(metadata, f, indent=2, sort_keys=True)
+     os.replace(tmp_json, json_path)
+ 
+-    print(f"\nDone!")
++    print("\nDone!")
+     print(f"  Output: {output_path}")
+     print(f"  Tokens: {token_count:,}")
+     print(f"  Examples: {example_count:,}")
+@@ -221,7 +220,7 @@ def main():
+ 
+     # Print final summary.
+     print("\n" + "=" * 60)
+-    print(f"Summary:")
++    print("Summary:")
+     for k, v in metadata.items():
+         print(f"  {k}: {v}")
+     print("=" * 60)
+diff --git a/scripts/profile_flops.py b/scripts/profile_flops.py
+index 361414a..59670e7 100644
+--- a/scripts/profile_flops.py
++++ b/scripts/profile_flops.py
+@@ -2,7 +2,6 @@
+ import sys
+ import json
+ from pathlib import Path
+-import torch
+ 
+ sys.path.insert(0, str(Path(__file__).parent.parent))
+ 
+diff --git a/scripts/validate_configs.py b/scripts/validate_configs.py
+index 5593e9e..f80cece 100644
+--- a/scripts/validate_configs.py
++++ b/scripts/validate_configs.py
+@@ -4,7 +4,6 @@ from __future__ import annotations
+ 
+ import argparse
+ import json
+-from pathlib import Path
+ from typing import Any, Dict, List, Tuple
+ 
+ ALLOWED_MAIN_DIFFS = {
+diff --git a/scripts/validate_log.py b/scripts/validate_log.py
+index 3f6bcbe..07f03f2 100644
+--- a/scripts/validate_log.py
++++ b/scripts/validate_log.py
+@@ -17,7 +17,10 @@ def parse_float(x: str) -> float:
+ def main() -> None:
+     ap = argparse.ArgumentParser()
+     ap.add_argument("csv_path")
+-    ap.add_argument("--allow-nan-val", action="store_true")
++    ap.add_argument("--allow-nan-val", action="store_true",
++                    help="legacy no-op (nan val on non-eval rows is now the default contract)")
++    ap.add_argument("--require-val-every-row", action="store_true",
++                    help="strict mode: every CSV row must carry a finite val_loss")
+     args = ap.parse_args()
+ 
+     path = Path(args.csv_path)
+@@ -41,6 +44,7 @@ def main() -> None:
+ 
+     prev_step = -1
+     prev_tokens = -1
++    n_finite_val = 0
+     for i, r in enumerate(rows):
+         step = int(r["step"])
+         tokens = int(r["tokens_seen"])
+@@ -53,9 +57,22 @@ def main() -> None:
+         if not math.isfinite(train_loss):
+             raise RuntimeError(f"non-finite train_loss at row {i}: {r['train_loss']}")
+         val_loss = parse_float(r.get("val_loss", "nan"))
+-        if not args.allow_nan_val and not math.isfinite(val_loss):
++        # Contract fix (pre-pilot audit): the trainer logs every `log_every`
++        # steps but evaluates every `val_every` steps, so nan val_loss on
++        # non-eval rows is NORMAL (a real pilot log has ~4 nan rows per eval
++        # row). The old default rejected every real log. Now: nan rows are
++        # fine, but every PRESENT val_loss must be finite, and at least one
++        # eval row must exist.
++        if math.isfinite(val_loss):
++            n_finite_val += 1
++        elif r.get("val_loss", "") not in ("", "nan", "NaN"):
+             raise RuntimeError(f"non-finite val_loss at row {i}: {r.get('val_loss')}")
+-    print(f"LOG VALID: rows={len(rows)} final_step={prev_step} final_tokens={prev_tokens}")
++        elif args.require_val_every_row:
++            raise RuntimeError(f"missing val_loss at row {i} (strict mode)")
++    if n_finite_val == 0:
++        raise RuntimeError("no finite val_loss anywhere - eval never ran")
++    print(f"LOG VALID: rows={len(rows)} eval_rows={n_finite_val} "
++          f"final_step={prev_step} final_tokens={prev_tokens}")
+ 
+ 
+ if __name__ == "__main__":
+diff --git a/src/data.py b/src/data.py
+index 4c011df..96357a0 100644
+--- a/src/data.py
++++ b/src/data.py
+@@ -33,7 +33,7 @@ import json
+ import os
+ import random
+ from dataclasses import dataclass, asdict
+-from typing import Any, Dict, Optional, Sequence
++from typing import Any, Dict, Optional
+ 
+ import numpy as np
+ import torch
+diff --git a/src/eval.py b/src/eval.py
+index 3d3d13a..e348143 100644
+--- a/src/eval.py
++++ b/src/eval.py
+@@ -915,6 +915,71 @@ def prefix_matching_score(model, device="cpu", seed: int = 42, batch_size: int =
+         model.train(was_training)
+ 
+ 
++@torch.no_grad()
++def attention_needle_snr(model, device="cpu", seed: int = 42,
++                         batch_size: int = 4) -> Dict[str, float]:
++    """Attention signal-to-noise on the induction task (Diff-Transformer-style
++    Table-3 readout, adapted to our probe framework).
++
++    Plant [A][B] in random filler, query with the second [A] at T-2, capture
++    attention (diagnostics forward), and read WHERE the final-layer heads look
++    from the query position:
++
++      snr_needle = attn_mass(needle pair) / attn_mass(mean filler token)
++
++    ~1 at random init (no preference, calibration-tested); >>1 after training
++    means retrieval concentrates on the target - the direct activation-level
++    quantification of the "suppress irrelevant keys" claim (salience/gates).
++    Reported per last layer (retrieval heads live late) plus best over layers,
++    so the paper figure does not depend on a single-layer choice.
++    NaN for tiny vocabs (needs the induction token block), like the probes.
++    """
++    was_training = model.training
++    prev_diag = bool(model.transformer.h[0].attn.capture_diagnostics)
++    prev_attn = bool(model.transformer.h[0].attn.capture_attention)
++    model.eval()
++    model.set_diagnostics(enabled=True, capture_attention=True)
++    try:
++        T = min(256, model.config.block_size)
++        if T < 16 or model.config.vocab_size < INDUCTION_TOK_B_OFFSET + batch_size:
++            return {"snr_needle_last": float("nan"), "snr_needle_best": float("nan")}
++        g = torch.Generator(device="cpu")
++        g.manual_seed(seed)
++        lo = INDUCTION_TOK_B_OFFSET + batch_size
++        tokens = torch.randint(lo, model.config.vocab_size,
++                               (batch_size, T), generator=g)
++        i = torch.arange(batch_size)
++        pos_ab = T // 3
++        tokens[:, pos_ab] = INDUCTION_TOK_A_OFFSET + i
++        tokens[:, pos_ab + 1] = INDUCTION_TOK_B_OFFSET + i
++        q_pos = T - 2
++        tokens[:, q_pos] = INDUCTION_TOK_A_OFFSET + i
++        model(tokens.to(device))
++
++        eps = 1e-12
++        per_layer = []
++        for block in model.transformer.h:
++            att = getattr(block.attn, "last_attn", None)
++            if att is None:
++                continue
++            att = att.detach().float()               # (B, H, Tq, Tk)
++            row = att[:, :, q_pos, :]                # (B, H, Tk)
++            needle = row[:, :, pos_ab:pos_ab + 2].sum(-1) / 2.0
++            mask = torch.ones(row.shape[-1], dtype=torch.bool)
++            mask[pos_ab:pos_ab + 2] = False
++            mask[q_pos:] = False                     # exclude self/future
++            filler = row[:, :, mask].mean(-1)
++            snr = (needle / filler.clamp_min(eps)).mean()
++            per_layer.append(float(snr))
++        if not per_layer:
++            return {"snr_needle_last": float("nan"), "snr_needle_best": float("nan")}
++        return {"snr_needle_last": per_layer[-1],
++                "snr_needle_best": float(max(per_layer))}
++    finally:
++        model.set_diagnostics(enabled=prev_diag, capture_attention=prev_attn)
++        model.train(was_training)
++
++
+ __all__ = [
+     "evaluate_induction",
+     "evaluate_distractor_induction",
+@@ -931,5 +996,6 @@ __all__ = [
+     "mechanism_knockout",
+     "gate_redundancy_statistics",
+     "positional_recall_curve",
++    "attention_needle_snr",
+     "prefix_matching_score",
+ ]
+diff --git a/src/make_init.py b/src/make_init.py
+index 086d261..e18326e 100644
+--- a/src/make_init.py
++++ b/src/make_init.py
+@@ -42,7 +42,7 @@ import json
+ import os
+ import random
+ import sys
+-from typing import Any, Dict, Iterable, List, Optional, Tuple
++from typing import Any, Dict, List, Optional, Tuple
+ import re
+ 
+ import numpy as np
+diff --git a/src/manifest.py b/src/manifest.py
+index e85bb9a..a9689fa 100644
+--- a/src/manifest.py
++++ b/src/manifest.py
+@@ -28,7 +28,7 @@ import platform
+ import sys
+ import time
+ from pathlib import Path
+-from typing import Any, Dict, Iterable, Optional
++from typing import Any, Dict, Optional
+ 
+ 
+ def canonical_json(obj: Any) -> str:
+diff --git a/src/train_xla.py b/src/train_xla.py
+index a4cf8cd..c2c66c4 100644
+--- a/src/train_xla.py
++++ b/src/train_xla.py
+@@ -906,10 +906,23 @@ def _cast_state_dict_for_weights(state: Dict[str, torch.Tensor], dtype: Optional
+ 
+ 
+ def atomic_xm_save(payload: Any, path: str, *, master_only: bool = True) -> None:
+-    """Atomic save on master. All ranks may call safely."""
++    """Atomic save on master. All ranks may call safely.
++
++    Day-1 finding #8: the tmp name must be IDENTICAL in every process.
++    xm.save(master_only=True) writes through the RUNTIME's master process,
++    which on PJRT need not be the xr.global_ordinal()==0 process that later
++    calls os.replace (observed: rank=0 lived on local_rank=3). With time+pid
++    in the name each process computed its OWN tmp - the writer wrote to its
++    tmp while rank 0 replaced a name nobody created -> FileNotFoundError
++    ('...tmp.1785696336.827'). A deterministic shared name makes writer and
++    replacer agree no matter which process the runtime picks.
++    """
+     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+-    tmp = f"{path}.tmp.{int(time.time())}.{os.getpid()}"
++    tmp = f"{path}.tmp"
+     xm.save(payload, tmp, master_only=master_only)
++    # Writer must be done before the replace (they can be different
++    # processes); all ranks reach this call, so the barrier is safe.
++    rendezvous("atomic_save_" + os.path.basename(path))
+     if is_master():
+         os.replace(tmp, path)
+ 
+diff --git a/tests/test_ablation_configs.py b/tests/test_ablation_configs.py
+index fcf646c..5be0509 100644
+--- a/tests/test_ablation_configs.py
++++ b/tests/test_ablation_configs.py
+@@ -169,7 +169,6 @@ class TestSharedInitCompatibility:
+     """Review attack N6/N7: one init per seed must strict-load into EVERY arm."""
+ 
+     def test_base_arm_init_loads_into_all_arms(self, templates):
+-        import torch
+         from src.model import GPT, GPTConfig
+         base, hla = templates
+         small = dict(n_layer=2, n_head=2, n_embd=32, block_size=64,
+@@ -809,3 +808,70 @@ class TestIsoFlopsPairs:
+         card = open(os.path.join(ROOT, "docs", "EXPERIMENT_CARD.md"), encoding="utf-8").read()
+         assert "Two comparison axes" in card
+         assert "base-longer" in card
++
++
++class TestPaperFactsConsistency:
++    """Reviewer-facing numbers must agree across README / DATA_CARD - a
++    single mismatched token count is the kind of detail that costs trust
++    (and did exist: README said 5.4B while the produced set is 4.7B)."""
++
++    def test_readme_token_count_matches_data_card(self):
++        import re
++        readme = open(os.path.join(ROOT, "README.md")).read()
++        card = open(os.path.join(ROOT, "docs", "DATA_CARD.md")).read()
++        m = re.search(r"--train-tokens (\d+)", readme)
++        assert m, "README quick-start must show the real prepare command"
++        readme_tokens = int(m.group(1))
++        m2 = re.search(r"num_tokens \(train\) \| ([\d,]+)", card)
++        assert m2, "DATA_CARD must pin the produced num_tokens"
++        card_tokens = int(m2.group(1).replace(",", ""))
++        assert readme_tokens == card_tokens, (
++            f"README --train-tokens {readme_tokens} != DATA_CARD {card_tokens}")
++
++    def test_data_card_pins_stream_fingerprint(self):
++        card = open(os.path.join(ROOT, "docs", "DATA_CARD.md")).read()
++        assert "content_sha256_stream" in card and "4edd8fa4" in card, (
++            "DATA_CARD must pin the produced dataset fingerprint")
++        assert "1588ec45" in card, "DATA_CARD must pin the C4 revision"
++
++
++class TestPaperFigures:
++    """Paper figures are generated by scripts/make_paper_figures.py from run
++    artifacts - the figure code must exist, parse, and expose one function
++    per load-bearing figure (fig1 twins, fig2 LITM, fig3 H5)."""
++
++    def test_script_parses_and_has_three_figures(self):
++        import ast
++        path = os.path.join(ROOT, "scripts", "make_paper_figures.py")
++        tree = ast.parse(open(path).read())
++        fns = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
++        for fn in ("fig1_twin_divergence", "fig2_litm_curves", "fig3_gap_closure"):
++            assert fn in fns, f"missing figure function {fn}"
++
++    def test_fig3_draws_preregistered_thresholds(self):
++        """The 50%/20% H5 decision lines are the pre-registered reading of
++        the experiment - the figure must draw them, not leave them to text."""
++        src = open(os.path.join(ROOT, "scripts", "make_paper_figures.py")).read()
++        assert "0.2" in src and "0.5" in src and "gap_closure" in src
++
++    def test_repo_has_no_unused_imports(self):
++        """pyflakes-clean is a shipping standard for this repo (was violated
++        by 23 files once). AST-level check: no obviously-unused top-level
++        'import X' in src/ and scripts/ (cheap approximation, no pyflakes
++        dependency on CI)."""
++        import ast, glob as _glob
++        offenders = []
++        for path in _glob.glob(os.path.join(ROOT, "src", "*.py")) + \
++                _glob.glob(os.path.join(ROOT, "scripts", "*.py")):
++            src = open(path).read()
++            tree = ast.parse(src)
++            body_src = src
++            for node in tree.body:
++                if isinstance(node, ast.Import):
++                    for a in node.names:
++                        name = (a.asname or a.name).split(".")[0]
++                        # crude usage count: name appears beyond the import line
++                        uses = body_src.count(name)
++                        if uses <= 1 and name not in ("annotations",):
++                            offenders.append(f"{os.path.basename(path)}:{name}")
++        assert not offenders, f"unused imports: {offenders}"
+diff --git a/tests/test_data.py b/tests/test_data.py
+index 3cfd0fd..bae319e 100644
+--- a/tests/test_data.py
++++ b/tests/test_data.py
+@@ -158,7 +158,7 @@ class TestTokenizerBackends:
+         """The batched writer must produce the same stream as the old
+         per-document loop: verify against a manual reference encoding."""
+         prep = self._prep()
+-        import tiktoken, hashlib
++        import tiktoken
+         import numpy as np
+         corpus = self._corpus()
+         enc = tiktoken.get_encoding("gpt2")
+@@ -178,10 +178,9 @@ class TestTokenizerBackends:
+         assert np.array_equal(got, ref), "batched writer changed the token stream"
+ 
+     def test_backends_bit_identical(self, tmp_path):
+-        import pytest as _pytest
+         prep = self._prep()
+         if prep._gigatoken is None:
+-            _pytest.skip("gigatoken not installed")
++            pytest.skip("gigatoken not installed")
+         import hashlib
+         corpus = self._corpus()
+         outs = {}
+@@ -220,7 +219,6 @@ class TestTokenizerBackends:
+         text), on every backend. The gigatoken compat layer refuses such
+         documents, so the encoder must route them to reference tiktoken -
+         verified here against a manually built legacy stream."""
+-        import pytest as _pytest
+         prep = self._prep()
+         import tiktoken
+         import numpy as np
+diff --git a/tests/test_eval.py b/tests/test_eval.py
+index b0bf316..dcda272 100644
+--- a/tests/test_eval.py
++++ b/tests/test_eval.py
+@@ -745,3 +745,114 @@ class TestCausalPatch:
+         bad = dict(bs); bad.pop(next(iter(bad)))
+         with _pytest.raises(ValueError, match="not a sterile pair"):
+             cp.build_franken(bad, hs, 32, "qk")
++
++    def test_probe_keys_not_double_prefixed(self):
++        """v1 wrote distractor_distractor_induction (re-prefixed keys that
++        already carried the prefix) - the H5 JSON would have silently missed
++        the pre-registered metric names."""
++        cp, bs, hs = self._pair()
++        m = GPT(GPTConfig(**self.KW))
++        m.load_state_dict(hs, strict=True)
++        out = cp.probe(m.eval(), batch_size=2)
++        assert "distractor_distractor_induction" not in out
++        assert "distractor_induction" in out or "distractor_error" in out
++
++    def test_gap_closure_guard_small_gap(self):
++        """closure = (fr-b)/(hla-b) on a near-zero gap manufactures arbitrary
++        percentages; the guard must refuse (NaN + flag), never divide."""
++        cp, _, _ = self._pair()
++        base = {"induction": 0.5000}
++        hla = {"induction": 0.5000 + 1e-6}   # below MIN_MEANINGFUL_GAP
++        fr = {"induction": 0.9}
++        rec = cp.gap_closure(base, hla, fr)["induction"]
++        assert rec["closure"] != rec["closure"]          # NaN
++        assert rec.get("closure_note") == 1.0
++
++    def test_gap_closure_math(self):
++        cp, _, _ = self._pair()
++        base = {"induction": 0.10, "induction_std": 0.0}
++        hla = {"induction": 0.30, "induction_std": 0.0}
++        fr = {"induction": 0.25, "induction_std": 0.0}
++        rec = cp.gap_closure(base, hla, fr)["induction"]
++        assert abs(rec["closure"] - 0.75) < 1e-9         # (0.25-0.10)/(0.30-0.10)
++        assert rec["closure_std_bound"] == 0.0
++
++    def test_probe_multi_reports_std(self):
++        cp, bs, hs = self._pair()
++        m = GPT(GPTConfig(**self.KW))
++        m.load_state_dict(hs, strict=True)
++        out = cp.probe_multi(m.eval(), seeds=(1, 2), batch_size=2)
++        assert "induction" in out and "induction_std" in out
++        assert out["induction_std"] >= 0.0
++
++
++class TestAttentionNeedleSNR:
++    """Diff-Transformer-lesson metric (their Table 3 'attention noise'):
++    activation-level SNR of retrieval. The Oral-tier reading of our
++    salience/gate claim needs a direct 'where does attention LOOK' number,
++    not only P(B) probes."""
++
++    KW = dict(block_size=256, vocab_size=50257, n_layer=2, n_head=2,
++              n_embd=64, gradient_checkpointing=False)
++
++    def test_snr_near_one_at_random_init(self):
++        from src.eval import attention_needle_snr
++        torch.manual_seed(0)
++        m = GPT(GPTConfig(**self.KW)).eval()
++        out = attention_needle_snr(m)
++        assert 0.3 < out["snr_needle_last"] < 3.0, (
++            "random init has no needle preference; SNR must be ~1 "
++            f"(got {out['snr_needle_last']})")
++        assert out["snr_needle_best"] >= out["snr_needle_last"] - 1e-9
++
++    def test_snr_nan_on_tiny_vocab(self):
++        import math
++        from src.eval import attention_needle_snr
++        c = GPTConfig(block_size=64, vocab_size=32, n_layer=1, n_head=2,
++                      n_embd=32, gradient_checkpointing=False)
++        out = attention_needle_snr(GPT(c).eval())
++        assert math.isnan(out["snr_needle_last"])
++
++    def test_snr_restores_model_state(self):
++        """Probe is side-effect-free like every other probe (tested class
++        invariant): diagnostics flags and training mode restored."""
++        from src.eval import attention_needle_snr
++        m = GPT(GPTConfig(**self.KW))
++        m.train()
++        attention_needle_snr(m)
++        assert m.training
++        assert not m.transformer.h[0].attn.capture_diagnostics
++        assert not m.transformer.h[0].attn.capture_attention
++
++    def test_snr_detects_planted_signal(self):
++        """Ground-truth: a model FORCED to attend at the needle must show
++        SNR >> 1 - the metric must actually move when the behavior exists."""
++        from src.eval import attention_needle_snr
++        torch.manual_seed(0)
++        m = GPT(GPTConfig(**self.KW)).eval()
++        base = attention_needle_snr(m)["snr_needle_last"]
++        # Craft attention artificially: huge salience toward needle tokens is
++        # impractical to force directly; instead verify metric monotonicity
++        # via a synthetic attention override on the last block.
++        blk = m.transformer.h[-1].attn
++        orig = blk.forward
++        import types as _t
++
++        def fake_forward(self, x):
++            out = orig(x)
++            if self.capture_attention and self.last_attn is not None:
++                att = self.last_attn.clone()
++                T = att.shape[-1]
++                pos_ab = T // 3
++                att[:, :, T - 2, :] = 1e-6
++                att[:, :, T - 2, pos_ab] = 0.5
++                att[:, :, T - 2, pos_ab + 1] = 0.5
++                self.last_attn = att
++            return out
++
++        blk.forward = _t.MethodType(fake_forward, blk)
++        boosted = attention_needle_snr(m)["snr_needle_last"]
++        blk.forward = orig
++        assert boosted > 100 * max(base, 1e-9), (
++            f"metric must saturate when attention IS on the needle "
++            f"(base={base:.3f}, boosted={boosted:.3f})")
+diff --git a/tests/test_model.py b/tests/test_model.py
+index cb6d05b..f2c2a25 100644
+--- a/tests/test_model.py
++++ b/tests/test_model.py
+@@ -423,7 +423,6 @@ class TestLayerDependentPhase:
+ 
+     def test_depth_scales_phase(self):
+         """Layer 0 keeps budget = pi*phase_mult; deepest layer gets ~2x."""
+-        import math as _m
+         model = GPT(small_cfg(**self.KW, n_layer=4, layer_dependent_phase=True)).eval()
+         model.set_diagnostics(enabled=True)
+         with torch.no_grad():
+diff --git a/tests/test_theory.py b/tests/test_theory.py
+index 2acadb5..3b71ed9 100644
+--- a/tests/test_theory.py
++++ b/tests/test_theory.py
+@@ -23,7 +23,6 @@ import math
+ import os
+ import sys
+ 
+-import pytest
+ import torch
+ 
+ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+diff --git a/tests/test_train_utils.py b/tests/test_train_utils.py
+index c58fb0f..66adbd6 100644
+--- a/tests/test_train_utils.py
++++ b/tests/test_train_utils.py
+@@ -485,3 +485,45 @@ class TestHbmBudget:
+ 
+         diff = (one_update(1) - one_update(8)).abs().max().item()
+         assert diff < 1e-5, f"accum changed the update: max weight diff {diff}"
++
++    def test_atomic_save_tmp_name_deterministic(self):
++        """Finding #8: on PJRT the xm.save writer process and the
++        xr-rank-0 replacer can be DIFFERENT processes (observed rank=0 on
++        local_rank=3, pid 827). A time+pid tmp name diverges between them:
++        writer writes its own tmp, replacer renames a nonexistent one ->
++        FileNotFoundError best_val_*.pt.tmp.1785696336.827 (real crash).
++        The tmp name must contain no per-process entropy, and a barrier must
++        sit between write and replace."""
++        src = open(os.path.join(ROOT, "src", "train_xla.py")).read()
++        start = src.find("def atomic_xm_save")
++        body = src[start:src.find("\ndef ", start + 1)]
++        assert 'tmp = f"{path}.tmp"' in body, "tmp name must be deterministic"
++        assert "os.getpid()" not in body, "pid in tmp name re-opens finding #8"
++        assert "time.time()" not in body, "timestamp in tmp name re-opens finding #8"
++        assert "rendezvous(" in body, "need write->replace barrier across processes"
++
++    def test_validate_log_accepts_real_log_shape(self, tmp_path):
++        """Finding #9 (pre-pilot audit): the trainer writes a row every
++        log_every steps but evaluates every val_every steps, so real logs
++        have nan val_loss on most rows. validate_log.py's default mode
++        rejected EVERY real pilot log. Contract now: nan val rows fine,
++        present val values must be finite, and >=1 eval row must exist."""
++        import subprocess, sys as _sys
++        p = tmp_path / "log.csv"
++        p.write_text(
++            "step,tokens_seen,train_loss,val_loss\n"
++            "1,100,10.5,10.6\n"
++            "2,200,10.4,nan\n"
++            "3,300,10.3,10.5\n")
++        r = subprocess.run([_sys.executable,
++                            os.path.join(ROOT, "scripts", "validate_log.py"),
++                            str(p)], capture_output=True, text=True)
++        assert r.returncode == 0, r.stderr
++        assert "eval_rows=2" in r.stdout
++        # But a log where eval NEVER ran must fail.
++        p2 = tmp_path / "log2.csv"
++        p2.write_text("step,tokens_seen,train_loss,val_loss\n1,100,10.5,nan\n")
++        r2 = subprocess.run([_sys.executable,
++                             os.path.join(ROOT, "scripts", "validate_log.py"),
++                             str(p2)], capture_output=True, text=True)
++        assert r2.returncode != 0
