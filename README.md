@@ -10,9 +10,11 @@ Every attention head does two jobs with one set of vectors: retrieval and transm
 
 This repository has:
 
-1. The mechanism ([`src/model.py`](src/model.py));
-2. A sterile comparison;
-3. Metrics ([`docs/METRICS.md`](docs/METRICS.md)).
+1. The mechanism — one modified attention equation ([`src/model.py`](src/model.py), single file);
+2. A sterile comparison: identical data order, init backbone, objective and schedule for base/HLA twins ([`docs/STERILITY.md`](docs/STERILITY.md));
+3. Theory: 9 theorems incl. RoPE-commutation ([`docs/THEORY.md`](docs/THEORY.md));
+4. Pre-registered experiment design H1–H5 ([`docs/EXPERIMENT_CARD.md`](docs/EXPERIMENT_CARD.md));
+5. Every logged metric documented ([`docs/METRICS.md`](docs/METRICS.md)); data provenance pinned by revision + sha256 ([`docs/DATA_CARD.md`](docs/DATA_CARD.md)).
 
 
 
@@ -21,7 +23,7 @@ This repository has:
 ```bash
 git clone https://github.com/fanat503/Laplace-attention.git
 cd Laplace-attention
-pip install -r requirements.txt        # yoou can use CPU
+pip install -r requirements.txt        # CPU is enough for tests
 
 python -m pytest tests/ -q      
 python scripts/audit_sterility.py      
@@ -36,7 +38,7 @@ python src/make_init.py --shared-backbone \
     --base-config configs/200m_base_s42.json --hla-config configs/200m_hla_s42.json \
     --out-base inits/init_200m_base_s42.pt --out-hla inits/init_200m_hla_s42.pt
 
-python scripts/prepare_c4_data.py --train-tokens 5400000000 --val-tokens 20000000 --out-dir data
+python scripts/prepare_c4_data.py --train-tokens 4700000000 --val-tokens 20000000 --out-dir data
 
 python src/train_xla.py --config configs/200m_base_s42.json
 python src/train_xla.py --config configs/200m_hla_s42.json
@@ -51,4 +53,4 @@ python scripts/make_ablation_configs.py \
 
 If you use this code, please cite it via [`CITATION.cff`](CITATION.cff).
 
-**Apache-2.0**
+**Apache-2.0** · Independent research; replications and compute support welcome — open an issue.

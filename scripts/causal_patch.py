@@ -104,19 +104,86 @@ def build_franken(base_state: Dict[str, torch.Tensor],
     return out
 
 
-def probe(model: GPT, device: str = "cpu") -> Dict[str, float]:
+def probe(model: GPT, device: str = "cpu", seed: int = 42,
+          batch_size: int = 8) -> Dict[str, float]:
     out: Dict[str, float] = {}
-    out["induction"] = float(evaluate_induction(model, device=device, batch_size=8))
+    out["induction"] = float(evaluate_induction(
+        model, device=device, seed=seed, batch_size=batch_size))
     try:
-        d = evaluate_distractor_induction(model, device=device, batch_size=8)
-        out.update({f"distractor_{k}": float(v) for k, v in d.items()})
+        d = evaluate_distractor_induction(
+            model, device=device, seed=seed, batch_size=batch_size)
+        # Keys already carry the distractor_ prefix - do NOT re-prefix
+        # (v1 wrote distractor_distractor_induction; regression-tested now).
+        out.update({str(k): float(v) for k, v in d.items()})
     except Exception as e:
         out["distractor_error"] = str(e)  # type: ignore[assignment]
     try:
         out.update({f"posrec_{k}": float(v)
-                    for k, v in positional_recall_curve(model, device=device, batch_size=4).items()})
+                    for k, v in positional_recall_curve(
+                        model, device=device, seed=seed,
+                        batch_size=max(2, batch_size // 2)).items()})
     except Exception:
         pass
+    return out
+
+
+def probe_multi(model: GPT, device: str = "cpu", seeds=(42, 43, 44, 45, 46),
+                batch_size: int = 8) -> Dict[str, float]:
+    """Probe under several seeds -> mean and std per metric.
+
+    The H5 decision number needs an uncertainty: a gap-closure fraction
+    without error bars is exactly the kind of single-number claim Reviewer 2
+    strikes down. Seeds vary the synthetic probe content, not the model.
+    """
+    import statistics
+    per_seed = [probe(model, device=device, seed=s, batch_size=batch_size)
+                for s in seeds]
+    keys = [k for k in per_seed[0]
+            if all(isinstance(r.get(k), float) for r in per_seed)]
+    out: Dict[str, float] = {}
+    for k in keys:
+        vals = [r[k] for r in per_seed if r[k] == r[k]]  # drop NaN
+        if not vals:
+            out[k] = float("nan")
+            out[f"{k}_std"] = float("nan")
+            continue
+        out[k] = float(statistics.fmean(vals))
+        out[f"{k}_std"] = float(statistics.stdev(vals)) if len(vals) > 1 else 0.0
+    return out
+
+
+GAP_METRICS = ("induction", "distractor_induction", "distractor_margin",
+               "posrec_litm_worst_frac")
+# Pre-registered (EXPERIMENT_CARD H5): >50% closure on retrieval probes =>
+# retrieval geometry CAUSES the gain; <20% => story is NOT causal - report so.
+MIN_MEANINGFUL_GAP = 1e-4
+
+
+def gap_closure(base: Dict[str, float], hla: Dict[str, float],
+                franken: Dict[str, float]) -> Dict[str, Dict[str, float]]:
+    """closure = (franken - base) / (hla - base), guarded.
+
+    Guards (each has a test):
+      - |hla-base| < MIN_MEANINGFUL_GAP -> closure undefined (NaN), flagged:
+        dividing by a near-zero gap manufactures arbitrary percentages;
+      - propagated std via first-order bounds from per-metric stds.
+    """
+    out: Dict[str, Dict[str, float]] = {}
+    for m in GAP_METRICS:
+        if m not in base or m not in hla or m not in franken:
+            continue
+        gap = hla[m] - base[m]
+        rec = {"base": base[m], "hla": hla[m], "franken": franken[m],
+               "gap": gap}
+        if not (gap == gap) or abs(gap) < MIN_MEANINGFUL_GAP:
+            rec["closure"] = float("nan")
+            rec["closure_note"] = 1.0  # gap too small to attribute
+        else:
+            rec["closure"] = (franken[m] - base[m]) / gap
+            noise = max(base.get(f"{m}_std", 0.0), hla.get(f"{m}_std", 0.0),
+                        franken.get(f"{m}_std", 0.0))
+            rec["closure_std_bound"] = 3.0 * noise / abs(gap)
+        out[m] = rec
     return out
 
 
@@ -130,6 +197,9 @@ def main() -> None:
                     choices=["qk", "phase", "retrieval", "full"])
     ap.add_argument("--out", required=True)
     ap.add_argument("--device", default="cpu")
+    ap.add_argument("--probe-seeds", default="42,43,44,45,46",
+                    help="comma-separated probe seeds (error bars for H5)")
+    ap.add_argument("--probe-batch", type=int, default=8)
     args = ap.parse_args()
 
     cfg = json.load(open(args.hla_config, encoding="utf-8"))["model"]
@@ -138,16 +208,32 @@ def main() -> None:
     franken_state = build_franken(base_state, hla_state, int(cfg["n_embd"]), args.transplant)
 
     results: Dict[str, Dict[str, float]] = {}
+    seeds = tuple(int(s) for s in args.probe_seeds.split(","))
     for name, state in (("base", base_state), ("hla", hla_state), ("franken", franken_state)):
         model = GPT(GPTConfig(**cfg)).eval()
         model.load_state_dict(state, strict=True)
-        results[name] = probe(model, device=args.device)
+        results[name] = probe_multi(model, device=args.device, seeds=seeds,
+                                    batch_size=args.probe_batch)
         print(f"{name:8s}: " + "  ".join(f"{k}={v:.5f}" for k, v in results[name].items()
-                                         if isinstance(v, float) and "pos_" not in k))
+                                         if isinstance(v, float) and "pos_" not in k
+                                         and not k.endswith("_std")))
+
+    closure = gap_closure(results["base"], results["hla"], results["franken"])
+    results["gap_closure"] = closure  # type: ignore[assignment]
+    print("\n=== H5 gap closure (pre-registered: >0.50 causal, <0.20 not) ===")
+    for m, rec in closure.items():
+        if rec.get("closure_note"):
+            print(f"  {m:24s}: gap={rec['gap']:+.6f} TOO SMALL to attribute (no claim)")
+        else:
+            print(f"  {m:24s}: closure={rec['closure']:+.3f} "
+                  f"(±{rec.get('closure_std_bound', float('nan')):.3f}) "
+                  f"gap={rec['gap']:+.6f}")
 
     results["meta"] = {"transplant": args.transplant,  # type: ignore[assignment]
                        "base_checkpoint": args.base_checkpoint,
-                       "hla_checkpoint": args.hla_checkpoint}
+                       "hla_checkpoint": args.hla_checkpoint,
+                       "probe_seeds": list(seeds),
+                       "probe_batch": args.probe_batch}
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2)

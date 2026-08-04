@@ -906,10 +906,23 @@ def _cast_state_dict_for_weights(state: Dict[str, torch.Tensor], dtype: Optional
 
 
 def atomic_xm_save(payload: Any, path: str, *, master_only: bool = True) -> None:
-    """Atomic save on master. All ranks may call safely."""
+    """Atomic save on master. All ranks may call safely.
+
+    Day-1 finding #8: the tmp name must be IDENTICAL in every process.
+    xm.save(master_only=True) writes through the RUNTIME's master process,
+    which on PJRT need not be the xr.global_ordinal()==0 process that later
+    calls os.replace (observed: rank=0 lived on local_rank=3). With time+pid
+    in the name each process computed its OWN tmp - the writer wrote to its
+    tmp while rank 0 replaced a name nobody created -> FileNotFoundError
+    ('...tmp.1785696336.827'). A deterministic shared name makes writer and
+    replacer agree no matter which process the runtime picks.
+    """
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    tmp = f"{path}.tmp.{int(time.time())}.{os.getpid()}"
+    tmp = f"{path}.tmp"
     xm.save(payload, tmp, master_only=master_only)
+    # Writer must be done before the replace (they can be different
+    # processes); all ranks reach this call, so the barrier is safe.
+    rendezvous("atomic_save_" + os.path.basename(path))
     if is_master():
         os.replace(tmp, path)
 

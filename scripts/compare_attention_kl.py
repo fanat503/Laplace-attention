@@ -12,7 +12,6 @@ import os
 import sys
 from typing import Any, Dict
 
-import numpy as np
 import torch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

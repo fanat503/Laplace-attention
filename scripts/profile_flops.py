@@ -2,7 +2,6 @@
 import sys
 import json
 from pathlib import Path
-import torch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 

@@ -18,7 +18,7 @@ import argparse
 import json
 import os
 import sys
-from typing import Any, Dict, Tuple
+from typing import Any, Dict
 
 import torch
 

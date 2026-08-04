@@ -28,7 +28,7 @@ import platform
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Optional
 
 
 def canonical_json(obj: Any) -> str:

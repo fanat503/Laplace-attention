@@ -485,3 +485,45 @@ class TestHbmBudget:
 
         diff = (one_update(1) - one_update(8)).abs().max().item()
         assert diff < 1e-5, f"accum changed the update: max weight diff {diff}"
+
+    def test_atomic_save_tmp_name_deterministic(self):
+        """Finding #8: on PJRT the xm.save writer process and the
+        xr-rank-0 replacer can be DIFFERENT processes (observed rank=0 on
+        local_rank=3, pid 827). A time+pid tmp name diverges between them:
+        writer writes its own tmp, replacer renames a nonexistent one ->
+        FileNotFoundError best_val_*.pt.tmp.1785696336.827 (real crash).
+        The tmp name must contain no per-process entropy, and a barrier must
+        sit between write and replace."""
+        src = open(os.path.join(ROOT, "src", "train_xla.py")).read()
+        start = src.find("def atomic_xm_save")
+        body = src[start:src.find("\ndef ", start + 1)]
+        assert 'tmp = f"{path}.tmp"' in body, "tmp name must be deterministic"
+        assert "os.getpid()" not in body, "pid in tmp name re-opens finding #8"
+        assert "time.time()" not in body, "timestamp in tmp name re-opens finding #8"
+        assert "rendezvous(" in body, "need write->replace barrier across processes"
+
+    def test_validate_log_accepts_real_log_shape(self, tmp_path):
+        """Finding #9 (pre-pilot audit): the trainer writes a row every
+        log_every steps but evaluates every val_every steps, so real logs
+        have nan val_loss on most rows. validate_log.py's default mode
+        rejected EVERY real pilot log. Contract now: nan val rows fine,
+        present val values must be finite, and >=1 eval row must exist."""
+        import subprocess, sys as _sys
+        p = tmp_path / "log.csv"
+        p.write_text(
+            "step,tokens_seen,train_loss,val_loss\n"
+            "1,100,10.5,10.6\n"
+            "2,200,10.4,nan\n"
+            "3,300,10.3,10.5\n")
+        r = subprocess.run([_sys.executable,
+                            os.path.join(ROOT, "scripts", "validate_log.py"),
+                            str(p)], capture_output=True, text=True)
+        assert r.returncode == 0, r.stderr
+        assert "eval_rows=2" in r.stdout
+        # But a log where eval NEVER ran must fail.
+        p2 = tmp_path / "log2.csv"
+        p2.write_text("step,tokens_seen,train_loss,val_loss\n1,100,10.5,nan\n")
+        r2 = subprocess.run([_sys.executable,
+                             os.path.join(ROOT, "scripts", "validate_log.py"),
+                             str(p2)], capture_output=True, text=True)
+        assert r2.returncode != 0

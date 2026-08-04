@@ -42,7 +42,6 @@ import argparse
 import copy
 import json
 import os
-import sys
 
 ZERO_KEYS = {
     "phase_mult": 0.0,

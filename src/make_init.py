@@ -42,7 +42,7 @@ import json
 import os
 import random
 import sys
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import re
 
 import numpy as np

@@ -243,6 +243,24 @@ Unlike the other §10 probes this one IS captured during training (at the
 model, but reviewers will ask *when* the flattening emerges — a
 final-checkpoint number cannot answer that; a trajectory can.
 
+### `attention_needle_snr(model)`
+
+Activation-level retrieval signal-to-noise (adapted from Diff Transformer's
+attention-noise analysis, Ye et al. 2025): plant the [A][B] needle pair in
+filler, query with the second [A], capture attention on the diagnostics
+forward, and report
+
+`snr_needle = attn_mass(needle) / attn_mass(mean filler token)`
+
+from the query row: `snr_needle_last` (final layer; retrieval heads
+concentrate late) and `snr_needle_best` (max over layers). Calibrated ~1.0
+at random init (measured 1.010; no preference), >>1 when retrieval
+concentrates on the target. This is the direct "where does attention look"
+counterpart of the P(B)-based probes: P(B) can improve via V-path changes,
+snr_needle moves ONLY if the score geometry itself concentrates - exactly
+the H5 retrieval-geometry claim, measured in activations. NaN for tiny
+vocabs (deliberate, like the other probes).
+
 ### `attention_head_similarity(model)`
 
 Mean pairwise Jensen–Shannon divergence between per-head attention
