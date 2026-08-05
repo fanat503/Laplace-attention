@@ -428,8 +428,18 @@ class TestHbmBudget:
     def _attn_bytes(cfg):
         m = cfg["model"]
         b = int(cfg["batch_size_per_device"])
-        # fp32 softmax buffer per layer, all layers live during backward.
-        return int(m["n_layer"]) * b * int(m["n_head"]) * int(m["block_size"]) ** 2 * 4
+        # Finding #10 (v5e smoke): the fp32 softmax buffer is NOT alone.
+        # Every active score-bias mechanism (distance / salience / forget)
+        # materializes its own [B, H, T, T] tensor that backward keeps
+        # alive per layer. The base twin passed at b=2 while HLA hit
+        # 'Attempting to reserve 9.37G ... 9.28G free' - because this
+        # counter ignored the bias tensors. Count them.
+        n_buffers = 1
+        n_buffers += 1 if m.get("use_distance_laplace") else 0
+        n_buffers += 1 if m.get("use_salience_bias") else 0
+        n_buffers += 1 if m.get("use_forget_gate") or m.get("forget_alpha") else 0
+        return (int(m["n_layer"]) * b * int(m["n_head"])
+                * int(m["block_size"]) ** 2 * 4 * n_buffers)
 
     def test_tpu_v3_configs_fit_hbm(self):
         import glob as _glob, json as _json
@@ -447,8 +457,8 @@ class TestHbmBudget:
         assert checked >= 20
 
     def test_tokens_per_update_invariant_preserved(self):
-        """The OOM fix (b 16->2, accum 1->8) must NOT change the optimization
-        trajectory: tokens/update stays 262,144 for every 8-core 200m config."""
+        """The OOM fixes (b16->2->1, accum 1->8->16) must NOT change the
+        optimization trajectory: tokens/update stays 262,144 everywhere."""
         import glob as _glob, json as _json
         pats = ("kaggle_*.json", "200m_*.json", "tpu3_200m_*.json")
         for pat in pats:
@@ -527,3 +537,31 @@ class TestHbmBudget:
                              os.path.join(ROOT, "scripts", "validate_log.py"),
                              str(p2)], capture_output=True, text=True)
         assert r2.returncode != 0
+
+    def test_9h_configs_fit_one_session(self):
+        """Session policy (user + measured V4 numbers): a run must fit one
+        9h batch session AT THE MEASURED SPEED (0.53 steps/sec, V4), and if
+        hardware turns out slower the auto-resume tail must be bounded
+        (resume_every <= 500). 15000 steps = 8.3h at 0.53 -> single session;
+        worst case -20% -> ~1.8h follow-up, <=500 steps lost. This trades
+        the old hard-pessimism bound for +0.78B tokens (14.5 -> 18.1
+        tok/param), which strengthens the primary comparison."""
+        import glob as _glob, json as _json
+        found = 0
+        for p in sorted(_glob.glob(os.path.join(ROOT, "configs", "kaggle_200m_*_9h_*.json"))):
+            c = _json.load(open(p))
+            steps = int(c["max_steps"])
+            sps = 0.53  # V4-measured steady-state
+            total_h = (steps / sps
+                       + steps / int(c["val_every"]) * 25
+                       + steps / int(c["svd_every"]) * 110) / 3600
+            assert total_h <= 8.5, (
+                f"{os.path.basename(p)}: {total_h:.1f}h > 8.5h at measured "
+                "speed - does not fit a 9h session even optimistically")
+            # twin-pair invariants
+            assert (c["batch_size_per_device"] * 8 * c["model"]["block_size"]
+                    * c["grad_accum"]) == 262144
+            assert steps * 262144 <= 4_700_000_000
+            assert int(c["resume_every"]) <= 500, "need resume for session-splits"
+            found += 1
+        assert found == 2, "expected the base+hla 9h pair"

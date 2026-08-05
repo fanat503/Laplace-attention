@@ -150,11 +150,81 @@ def fig3_gap_closure(causal_json, out):
     print(f"wrote {out}")
 
 
+def fig4_knockout_context(analysis_json, out):
+    """Mechanism knockout Dloss vs context length (H2: the long-range
+    mechanisms must MATTER MORE as context grows - the quantitative
+    long-context evidence, one line per mechanism)."""
+    plt = require_matplotlib()
+    res = json.load(open(analysis_json, encoding="utf-8"))
+    ko = res.get("knockout_by_context_length")
+    if not ko:
+        raise SystemExit("analysis JSON lacks knockout_by_context_length")
+    lengths = sorted(int(k) for k in ko)
+    mechs = sorted({m for L in ko.values() for m in L if m.startswith("ko_")})
+    fig, ax = plt.subplots(figsize=(4.6, 3.2))
+    for m in mechs:
+        ys = [ko[str(L)].get(m, float("nan")) for L in lengths]
+        ax.plot(lengths, ys, "o-", ms=3.5, lw=1.3,
+                label=m.replace("ko_", "").replace("_delta", ""))
+    ax.axhline(0, color="k", lw=0.6)
+    ax.set_xlabel("context length (tokens)")
+    ax.set_ylabel("knockout \u0394loss")
+    ax.set_xscale("log", base=2)
+    ax.legend(fontsize=7, ncol=2)
+    fig.savefig(out)
+    plt.close(fig)
+    print(f"wrote {out}")
+
+
+def fig5_mechanism_trajectories(base_log, hla_log, out):
+    """Internal dynamics over training (GDN/Diff reviewer lesson: show WHEN
+    mechanisms wake up, not just that they exist): gate/salience activity,
+    saturation, and retrieval probes on one page, base vs HLA."""
+    plt = require_matplotlib()
+    panels = [
+        ("Gate activity", ["gate_k_mean", "gate_v_mean"]),
+        ("Mix envelope", ["mix_k_mean", "mix_v_mean"]),
+        ("Saturation", ["gate_k_sat_frac", "angle_q_sat_frac"]),
+        ("Retrieval probes", ["induction", "distractor_margin"]),
+        ("LITM scalars", ["litm_middle_drop", "litm_worst_frac"]),
+        ("Head interference", ["qk_interference", "qk_ov_separation"]),
+    ]
+    logs = {"base": read_log(base_log), "HLA": read_log(hla_log)}
+    colors = {"base": BASE_COLOR, "HLA": HLA_COLOR}
+    fig, axes = plt.subplots(2, 3, figsize=(11, 5.6))
+    for ax, (title, cols) in zip(axes.flat, panels):
+        drew = False
+        for name, log in logs.items():
+            for i, col in enumerate(cols):
+                if col not in log:
+                    continue
+                pairs = [(x, y) for x, y in zip(log["tokens_seen"], log[col])
+                         if not math.isnan(y)]
+                if not pairs:
+                    continue
+                ax.plot([p[0] for p in pairs], [p[1] for p in pairs],
+                        ["-", "--"][i % 2], color=colors[name], lw=1.2,
+                        label=f"{name}:{col}", alpha=0.9)
+                drew = True
+        ax.set_title(title, fontsize=9)
+        ax.set_xlabel("tokens", fontsize=8)
+        if drew:
+            ax.legend(fontsize=5.5)
+        else:
+            ax.text(0.5, 0.5, "no data", ha="center", va="center",
+                    transform=ax.transAxes, color="gray")
+    fig.tight_layout()
+    fig.savefig(out)
+    plt.close(fig)
+    print(f"wrote {out}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Paper-grade figures from run artifacts")
     ap.add_argument("--base-log")
     ap.add_argument("--hla-log")
     ap.add_argument("--causal-json")
+    ap.add_argument("--analysis-json")
     ap.add_argument("--seed-std", type=float, default=0.0,
                     help="val-loss std across seeds (for the gap inset)")
     ap.add_argument("--out-dir", required=True)
@@ -175,6 +245,19 @@ def main() -> None:
                              os.path.join(args.out_dir, "fig3_gap_closure.png"))
         except SystemExit as e:
             print(f"[skip fig3] {e}")
+    if args.base_log and args.hla_log:
+        try:
+            fig5_mechanism_trajectories(
+                args.base_log, args.hla_log,
+                os.path.join(args.out_dir, "fig5_mechanism_trajectories.png"))
+        except SystemExit as e:
+            print(f"[skip fig5] {e}")
+    if args.analysis_json:
+        try:
+            fig4_knockout_context(args.analysis_json,
+                                  os.path.join(args.out_dir, "fig4_knockout_context.png"))
+        except (SystemExit, OSError) as e:
+            print(f"[skip fig4] {e}")
 
 
 if __name__ == "__main__":

@@ -875,3 +875,16 @@ class TestPaperFigures:
                         if uses <= 1 and name not in ("annotations",):
                             offenders.append(f"{os.path.basename(path)}:{name}")
         assert not offenders, f"unused imports: {offenders}"
+
+    def test_paper_figures_has_five_figures(self):
+        """fig4 (knockout vs context: H2 long-range evidence) and fig5
+        (mechanism trajectories: GDN/Diff 'inner dynamics' reviewer ask)
+        joined fig1-3; the figure pipeline must expose all five."""
+        import ast
+        path = os.path.join(ROOT, "scripts", "make_paper_figures.py")
+        tree = ast.parse(open(path).read())
+        fns = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+        for fn in ("fig1_twin_divergence", "fig2_litm_curves",
+                   "fig3_gap_closure", "fig4_knockout_context",
+                   "fig5_mechanism_trajectories"):
+            assert fn in fns, f"missing {fn}"
