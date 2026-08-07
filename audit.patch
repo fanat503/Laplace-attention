@@ -1,0 +1,877 @@
+diff --git a/CONTRIBUTING.md b/CONTRIBUTING.md
+index c988694..9fa3ed0 100644
+--- a/CONTRIBUTING.md
++++ b/CONTRIBUTING.md
+@@ -2,7 +2,7 @@
+ 
+ ## Ground rules (they exist for scientific validity, not bureaucracy)
+ 
+-1. **No commit without green tests.** `python -m pytest tests/ -q -W error::UserWarning` must print `318 passed` (or more) before any push. CI enforces this, but run locally first.
++1. **No commit without green tests.** `python -m pytest tests/ -q -W error::UserWarning` must print `335 passed` (or more) before any push. CI enforces this, but run locally first.
+ 2. **Sterility is inviolable.** Any change touching `src/model.py`, `src/make_init.py`, config pairs, or the sampler must keep the identity/parameter-matching/data-order invariants (see `docs/STERILITY.md`). The relevant tests (`test_theory.py::TestTheorem1Identity`, `TestSterility`, `test_make_init.py`) are the gate.
+ 3. **New mechanisms follow the pattern**: identity-initialized (zero params ⇒ exact no-op, add to `reset_hla_identity` + `hla_identity_error` + `HLA_KEY_PATTERNS` + `HLA_NODECAY_MARKERS`), always-created for parameter matching, alpha-gated, clamped, with saturation diagnostics, an SDPA guard if it biases scores, and tests for identity/causality/gradient-flow/clip.
+ 4. **Configs change via the validators.** `validate_configs.py` (pair discipline) and `audit_config_values.py` (numeric sanity) must pass; new allowed diffs require justification in the PR description.
+diff --git a/docs/EXPERIMENT_CARD.md b/docs/EXPERIMENT_CARD.md
+index a106768..3ddbc79 100644
+--- a/docs/EXPERIMENT_CARD.md
++++ b/docs/EXPERIMENT_CARD.md
+@@ -34,6 +34,29 @@ H5 (CAUSAL, the Oral experiment): transplanting the trained HLA retrieval
+     narrative must be revised (reported either way). Ladder position: run
+     immediately after the first trained 200M pair.
+ 
++    H5-A (reverse / necessity, pre-registered BEFORE any pair was trained):
++    the mirror transplant (HLA body + base retrieval, --direction reverse)
++    must COLLAPSE the gain: reverse closure <50% (franken_rev falls toward
++    base) if retrieval geometry is necessary. Forward >50% AND reverse ALSO
++    >50% would mean the V/MLP path compensates - the boundary story is then
++    revised and reported honestly. Both directions ship in one run
++    (--direction both).
++
++    H4-P (linear-access probe, pre-registered before any trained pair):
++    scripts/train_probe.py decodes the needle identity from the residual
++    stream at the query position across depths. Reading: HLA's
++    probe_litm_gap (edge - middle accuracy at best layer) is closer to 0
++    than base's => mid-context info is genuinely more linearly accessible.
++    Runs post-hoc on any checkpoint; report alongside pos_XX curves.
++
++    H5-B (two-level evidence, pre-registered likewise): gap closure is
++    computed on FIVE metrics - the four behavioral probes plus
++    snr_needle_last (activation-level attention SNR). P(B)-style probes can
++    in principle be moved by the transmission path; snr_needle moves only
++    if the score geometry itself concentrates on the target. A franken that
++    inherits both the behavioral gap AND the SNR gap closes the causal
++    chain on two independent measurement levels.
++
+ ## Active mechanism sets per config (B6: capacity vs default)
+ 
+ The codebase implements SEVEN mechanisms; shipped training configs activate a
+diff --git a/docs/METRICS.md b/docs/METRICS.md
+index 9fe0fde..e527028 100644
+--- a/docs/METRICS.md
++++ b/docs/METRICS.md
+@@ -243,6 +243,24 @@ Unlike the other §10 probes this one IS captured during training (at the
+ model, but reviewers will ask *when* the flattening emerges — a
+ final-checkpoint number cannot answer that; a trajectory can.
+ 
++### `train_probe.py` — position-conditioned linear probing (H4-P)
++
++Ridge probe (closed-form, deterministic) on the residual stream at the query
++position: decode WHICH B-token the needle carried (8 classes, chance 0.125)
++as a function of needle depth (10..90%) and layer. Scalars:
++`probe_acc_middle`, `probe_acc_edge`, `probe_litm_gap` = edge − middle
++(0 = mid-context information is as linearly accessible as edge).
++Selection discipline: layer AND ridge-lambda are chosen on a VALIDATION
++split; the reported scalar is TEST accuracy of that choice (max-over-layers
++on the reporting split would be biased up by ~sigma*sqrt(2 ln L)).
++Honesty control: `probe_selectivity` = real-labels minus shuffled-labels
++accuracy at the selected layer (Hewitt & Liang, 2019) - near 0 means the
++probe memorizes rather than reads features; report it next to the gap.
++Pre-registered reading (H4-P): HLA flattens probe_litm_gap vs base — the
++information-ACCESS counterpart of the attention-level snr_needle and the
++behavioral pos_XX curve: three independent measurement levels of the same
++claim. Calibration-tested: chance at random init, ~1.0 on a planted signal.
++
+ ### `attention_needle_snr(model)`
+ 
+ Activation-level retrieval signal-to-noise (adapted from Diff Transformer's
+diff --git a/scripts/causal_patch.py b/scripts/causal_patch.py
+index df8d76f..f237640 100644
+--- a/scripts/causal_patch.py
++++ b/scripts/causal_patch.py
+@@ -55,6 +55,7 @@ if ROOT not in sys.path:
+ 
+ from src.model import GPT, GPTConfig  # noqa: E402
+ from src.eval import (  # noqa: E402
++    attention_needle_snr,
+     evaluate_induction,
+     evaluate_distractor_induction,
+     positional_recall_curve,
+@@ -83,24 +84,42 @@ def load_state(path: str) -> Dict[str, torch.Tensor]:
+ def build_franken(base_state: Dict[str, torch.Tensor],
+                   hla_state: Dict[str, torch.Tensor],
+                   n_embd: int,
+-                  transplant: str) -> Dict[str, torch.Tensor]:
+-    """Start from BASE everywhere, splice HLA's retrieval side in."""
++                  transplant: str,
++                  donor: str = "hla") -> Dict[str, torch.Tensor]:
++    """Splice the retrieval side of DONOR into the other twin's body.
++
++    donor="hla" (forward): base body + HLA retrieval - the SUFFICIENCY test
++      (does HLA's retrieval geometry carry the gain into a base body?).
++    donor="base" (reverse / anti-franken): HLA body + base retrieval - the
++      NECESSITY test (does removing HLA's retrieval geometry collapse the
++      gain?). Pre-registered reading: forward closure >50% AND reverse
++      closure <50% (gain collapses toward base) => retrieval geometry is
++      both sufficient and necessary. Forward high but reverse ALSO high
++      => the V/MLP path compensates - the boundary story needs revision;
++      report honestly.
++    """
+     if set(base_state) != set(hla_state):
+         raise ValueError("state dict key sets differ - not a sterile pair")
++    if donor == "hla":
++        body, graft = base_state, hla_state
++    elif donor == "base":
++        body, graft = hla_state, base_state
++    else:
++        raise ValueError(f"unknown donor: {donor}")
+     if transplant == "full":
+-        return dict(hla_state)
++        return dict(graft)
+ 
+-    out = {k: v.clone() if torch.is_tensor(v) else v for k, v in base_state.items()}
+-    for key in hla_state:
++    out = {k: v.clone() if torch.is_tensor(v) else v for k, v in body.items()}
++    for key in graft:
+         if ".c_attn.weight" in key:
+             # rows [0:2C] = Q,K (retrieval); rows [2C:3C] = V (transmission)
+             spliced = out[key].clone()
+-            spliced[: 2 * n_embd] = hla_state[key][: 2 * n_embd]
++            spliced[: 2 * n_embd] = graft[key][: 2 * n_embd]
+             out[key] = spliced
+         elif transplant in ("phase", "retrieval") and any(p in key for p in PHASE_KEYS):
+-            out[key] = hla_state[key].clone()
++            out[key] = graft[key].clone()
+         elif transplant == "retrieval" and any(p in key for p in RETRIEVAL_MECH_KEYS):
+-            out[key] = hla_state[key].clone()
++            out[key] = graft[key].clone()
+     return out
+ 
+ 
+@@ -124,6 +143,15 @@ def probe(model: GPT, device: str = "cpu", seed: int = 42,
+                         batch_size=max(2, batch_size // 2)).items()})
+     except Exception:
+         pass
++    # B-extension: activation-level SNR. P(B) can move through the V-path;
++    # snr_needle moves ONLY if the score geometry concentrates. A franken
++    # that inherits BOTH closes the causal story on two independent levels.
++    try:
++        out.update({str(k): float(v) for k, v in attention_needle_snr(
++            model, device=device, seed=seed,
++            batch_size=max(2, batch_size // 2)).items()})
++    except Exception:
++        pass
+     return out
+ 
+ 
+@@ -153,7 +181,7 @@ def probe_multi(model: GPT, device: str = "cpu", seeds=(42, 43, 44, 45, 46),
+ 
+ 
+ GAP_METRICS = ("induction", "distractor_induction", "distractor_margin",
+-               "posrec_litm_worst_frac")
++               "posrec_litm_worst_frac", "snr_needle_last")
+ # Pre-registered (EXPERIMENT_CARD H5): >50% closure on retrieval probes =>
+ # retrieval geometry CAUSES the gain; <20% => story is NOT causal - report so.
+ MIN_MEANINGFUL_GAP = 1e-4
+@@ -200,36 +228,60 @@ def main() -> None:
+     ap.add_argument("--probe-seeds", default="42,43,44,45,46",
+                     help="comma-separated probe seeds (error bars for H5)")
+     ap.add_argument("--probe-batch", type=int, default=8)
++    ap.add_argument("--direction", default="both",
++                    choices=["forward", "reverse", "both"],
++                    help="forward: base body + HLA retrieval (sufficiency); "
++                         "reverse: HLA body + base retrieval (necessity)")
+     args = ap.parse_args()
+ 
+     cfg = json.load(open(args.hla_config, encoding="utf-8"))["model"]
+     base_state = load_state(args.base_checkpoint)
+     hla_state = load_state(args.hla_checkpoint)
+-    franken_state = build_franken(base_state, hla_state, int(cfg["n_embd"]), args.transplant)
+-
+     results: Dict[str, Dict[str, float]] = {}
+     seeds = tuple(int(s) for s in args.probe_seeds.split(","))
+-    for name, state in (("base", base_state), ("hla", hla_state), ("franken", franken_state)):
++
++    arms = [("base", base_state), ("hla", hla_state)]
++    if args.direction in ("forward", "both"):
++        arms.append(("franken", build_franken(
++            base_state, hla_state, int(cfg["n_embd"]), args.transplant, donor="hla")))
++    if args.direction in ("reverse", "both"):
++        arms.append(("franken_rev", build_franken(
++            base_state, hla_state, int(cfg["n_embd"]), args.transplant, donor="base")))
++
++    for name, state in arms:
+         model = GPT(GPTConfig(**cfg)).eval()
+         model.load_state_dict(state, strict=True)
+         results[name] = probe_multi(model, device=args.device, seeds=seeds,
+                                     batch_size=args.probe_batch)
+-        print(f"{name:8s}: " + "  ".join(f"{k}={v:.5f}" for k, v in results[name].items()
+-                                         if isinstance(v, float) and "pos_" not in k
+-                                         and not k.endswith("_std")))
+-
+-    closure = gap_closure(results["base"], results["hla"], results["franken"])
+-    results["gap_closure"] = closure  # type: ignore[assignment]
+-    print("\n=== H5 gap closure (pre-registered: >0.50 causal, <0.20 not) ===")
+-    for m, rec in closure.items():
+-        if rec.get("closure_note"):
+-            print(f"  {m:24s}: gap={rec['gap']:+.6f} TOO SMALL to attribute (no claim)")
+-        else:
+-            print(f"  {m:24s}: closure={rec['closure']:+.3f} "
+-                  f"(±{rec.get('closure_std_bound', float('nan')):.3f}) "
+-                  f"gap={rec['gap']:+.6f}")
++        print(f"{name:12s}: " + "  ".join(f"{k}={v:.5f}" for k, v in results[name].items()
++                                          if isinstance(v, float) and "pos_" not in k
++                                          and not k.endswith("_std")))
++
++    if "franken" in results:
++        closure = gap_closure(results["base"], results["hla"], results["franken"])
++        results["gap_closure"] = closure  # type: ignore[assignment]
++        print("\n=== H5 FORWARD closure (sufficiency; pre-reg: >0.50 causal, <0.20 not) ===")
++        for m, rec in closure.items():
++            if rec.get("closure_note"):
++                print(f"  {m:24s}: gap={rec['gap']:+.6f} TOO SMALL to attribute (no claim)")
++            else:
++                print(f"  {m:24s}: closure={rec['closure']:+.3f} "
++                      f"(±{rec.get('closure_std_bound', float('nan')):.3f}) "
++                      f"gap={rec['gap']:+.6f}")
++    if "franken_rev" in results:
++        closure_r = gap_closure(results["base"], results["hla"], results["franken_rev"])
++        results["gap_closure_reverse"] = closure_r  # type: ignore[assignment]
++        print("\n=== H5 REVERSE closure (necessity; pre-reg: <0.50 = gain collapses) ===")
++        for m, rec in closure_r.items():
++            if rec.get("closure_note"):
++                print(f"  {m:24s}: gap={rec['gap']:+.6f} TOO SMALL to attribute (no claim)")
++            else:
++                print(f"  {m:24s}: closure={rec['closure']:+.3f} "
++                      f"(±{rec.get('closure_std_bound', float('nan')):.3f}) "
++                      f"gap={rec['gap']:+.6f}")
+ 
+     results["meta"] = {"transplant": args.transplant,  # type: ignore[assignment]
++                       "direction": args.direction,
+                        "base_checkpoint": args.base_checkpoint,
+                        "hla_checkpoint": args.hla_checkpoint,
+                        "probe_seeds": list(seeds),
+diff --git a/scripts/train_probe.py b/scripts/train_probe.py
+new file mode 100644
+index 0000000..6c3af92
+--- /dev/null
++++ b/scripts/train_probe.py
+@@ -0,0 +1,243 @@
++# Copyright 2026 Slyatski Ilya
++# Licensed under the Apache License, Version 2.0
++"""Position-conditioned linear probing of the residual stream (H4/feature axis).
++
++THE QUESTION this answers (mech-interp reviewer, protocol Phase 2.3):
++"P(B) probes and attention SNR show WHERE the model looks and WHAT it
++outputs - but is mid-context information actually MORE LINEARLY ACCESSIBLE
++in the residual stream of HLA than of its base twin?"
++
++Method (closed-form, deterministic, CPU-friendly):
++  1. Build N sequences with a needle pair [A][B] planted at a controlled
++     DEPTH FRACTION; the query [A] sits at T-2 (same layout as the
++     positional_recall_curve probe, so results are directly comparable).
++  2. Run the model, capture the residual stream AFTER EVERY BLOCK at the
++     query position (forward hooks; no model-code changes).
++  3. For each (layer, depth): fit a RIDGE classifier (one-vs-all,
++     closed-form via torch.linalg.solve - no SGD, no seeds beyond data)
++     on a train split to decode WHICH B-token the needle carried
++     (K classes), report held-out accuracy.
++  4. Scalars per model: probe_acc_middle (depth 0.5), probe_acc_edge
++     (mean of 0.1/0.9), probe_litm_gap = edge - middle (0 = flat access),
++     each at the best layer, plus the full layer x depth grid.
++
++Pre-registered reading (H4-P, registered before any trained pair existed):
++  HLA flattens probe_litm_gap relative to base => mid-context information
++  is genuinely more accessible, not merely more attended-to. Calibration:
++  at random init accuracy ~= 1/K at every depth (verified by test).
++
++Usage:
++    python scripts/train_probe.py --checkpoint runs/.../best.pt \
++        --config configs/kaggle_200m_hla_9h_s42.json --out probe.json
++Works on CPU; ~1 min for a 200m checkpoint at default sizes.
++"""
++from __future__ import annotations
++
++import argparse
++import json
++import os
++import sys
++from typing import Dict, List
++
++import torch
++
++ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++if ROOT not in sys.path:
++    sys.path.insert(0, ROOT)
++
++from src.model import GPT, GPTConfig  # noqa: E402
++
++DEPTHS = (0.1, 0.3, 0.5, 0.7, 0.9)
++N_CLASSES = 8          # which-B classification: chance = 1/8
++TOK_A = 45000          # same block as positional_recall_curve needles
++TOK_B0 = 46000
++
++
++def build_dataset(vocab_size: int, block_size: int, n_per_class: int,
++                  depth: float, seed: int):
++    """Sequences with [A][B_k] at depth; label k. Query [A] at T-2."""
++    g = torch.Generator().manual_seed(seed)
++    T = min(512, block_size)
++    n = N_CLASSES * n_per_class
++    toks = torch.randint(100, min(20000, vocab_size - 1), (n, T), generator=g)
++    labels = torch.arange(n) % N_CLASSES
++    pos = max(1, min(int(depth * (T - 4)), T - 4))
++    toks[:, pos] = TOK_A
++    toks[torch.arange(n), pos + 1] = TOK_B0 + labels
++    toks[:, T - 2] = TOK_A
++    return toks, labels, T
++
++
++@torch.no_grad()
++def capture_residuals(model: GPT, tokens: torch.Tensor, q_pos: int,
++                      batch: int = 16) -> List[torch.Tensor]:
++    """Residual stream after every block at q_pos: list of (N, C) tensors."""
++    feats: List[List[torch.Tensor]] = [[] for _ in model.transformer.h]
++    hooks = []
++
++    def mk_hook(i):
++        def hook(_m, _inp, out):
++            h = out[0] if isinstance(out, tuple) else out
++            feats[i].append(h[:, q_pos, :].detach().float().cpu())
++        return hook
++
++    for i, blk in enumerate(model.transformer.h):
++        hooks.append(blk.register_forward_hook(mk_hook(i)))
++    try:
++        for s in range(0, tokens.shape[0], batch):
++            model(tokens[s:s + batch])
++    finally:
++        for h in hooks:
++            h.remove()
++    return [torch.cat(f) for f in feats]
++
++
++LAMBDA_GRID = (1e-3, 1e-2, 1e-1, 1.0)
++
++
++def _ridge_fit_predict(Xtr, ytr, Xev, lam):
++    """One-vs-all ridge, closed form; returns predictions on Xev."""
++    mu = Xtr.mean(0, keepdim=True)
++    Xtr = Xtr - mu
++    Xev = Xev - mu
++    Y = torch.nn.functional.one_hot(ytr, N_CLASSES).float()
++    A = Xtr.T @ Xtr + lam * torch.eye(Xtr.shape[1])
++    W = torch.linalg.solve(A, Xtr.T @ Y)
++    return (Xev @ W).argmax(-1)
++
++
++def ridge_probe_split(X: torch.Tensor, y: torch.Tensor,
++                      split=(0.6, 0.2, 0.2), seed: int = 0):
++    """Three-way split. Returns (val_acc_per_lambda, test_acc_per_lambda).
++
++    Selection discipline: BOTH the layer and lambda are chosen on VAL;
++    the reported number is TEST accuracy of that (layer, lambda) - never
++    the max over anything test-derived. Fixes the selection-after-peeking
++    bias of the original max-over-layers-on-heldout scheme (max of L noisy
++    estimates is biased up by ~sigma*sqrt(2 ln L)).
++    """
++    n = X.shape[0]
++    n_tr, n_va = int(n * split[0]), int(n * split[1])
++    perm = torch.randperm(n, generator=torch.Generator().manual_seed(seed))
++    tr, va, te = perm[:n_tr], perm[n_tr:n_tr + n_va], perm[n_tr + n_va:]
++    val_accs, test_accs = [], []
++    for lam in LAMBDA_GRID:
++        pv = _ridge_fit_predict(X[tr], y[tr], X[va], lam)
++        pt = _ridge_fit_predict(X[tr], y[tr], X[te], lam)
++        val_accs.append(float((pv == y[va]).float().mean()))
++        test_accs.append(float((pt == y[te]).float().mean()))
++    return val_accs, test_accs
++
++
++def ridge_probe_accuracy(X: torch.Tensor, y: torch.Tensor,
++                         train_frac: float = 0.75, lam: float = 1e-2) -> float:
++    """Legacy two-way scheme (kept for the layer x depth GRID heatmap,
++    where per-cell selection is not performed and the bias concern does
++    not apply; scalars use ridge_probe_split)."""
++    n = X.shape[0]
++    n_tr = int(n * train_frac)
++    perm = torch.randperm(n, generator=torch.Generator().manual_seed(0))
++    tr, te = perm[:n_tr], perm[n_tr:]
++    pred = _ridge_fit_predict(X[tr], y[tr], X[te], lam)
++    return float((pred == y[te]).float().mean())
++
++
++def run_probe(model: GPT, n_per_class: int = 24, seed: int = 42) -> Dict:
++    was_training = model.training
++    model.eval()
++    try:
++        cfg = model.config
++        if cfg.vocab_size < TOK_B0 + N_CLASSES or min(512, cfg.block_size) < 32:
++            return {"probe_litm_gap": float("nan"), "note": "vocab/block too small"}
++        grid: Dict[str, Dict[str, float]] = {}
++        test_by_depth: Dict[float, float] = {}
++        sel_by_depth: Dict[float, Dict[str, float]] = {}
++        shuf_by_depth: Dict[float, float] = {}
++        g_shuf = torch.Generator().manual_seed(seed + 1)
++        for depth in DEPTHS:
++            toks, labels, T = build_dataset(cfg.vocab_size, cfg.block_size,
++                                            n_per_class, depth, seed)
++            feats = capture_residuals(model, toks, q_pos=T - 2)
++            # Grid heatmap (legacy two-way; no per-cell selection happens).
++            grid[f"depth_{int(depth*100):02d}"] = {
++                f"L{i:02d}": ridge_probe_accuracy(X, labels)
++                for i, X in enumerate(feats)}
++            # Scalars: three-way split; layer AND lambda chosen on VAL,
++            # number reported from TEST (selection-bias-free).
++            best_val, best_test, best_layer, best_lam = -1.0, float("nan"), -1, -1
++            for i, X in enumerate(feats):
++                va, te = ridge_probe_split(X, labels)
++                j = max(range(len(va)), key=va.__getitem__)
++                if va[j] > best_val:
++                    best_val, best_test = va[j], te[j]
++                    best_layer, best_lam = i, j
++            test_by_depth[depth] = best_test
++            sel_by_depth[depth] = {"layer": best_layer,
++                                   "lambda": LAMBDA_GRID[best_lam],
++                                   "val_acc": best_val}
++            # Selectivity control (Hewitt & Liang): shuffled labels must
++            # collapse to chance, else the probe memorizes examples.
++            y_shuf = labels[torch.randperm(len(labels), generator=g_shuf)]
++            Xb = feats[best_layer]
++            _, te_shuf = ridge_probe_split(Xb, y_shuf)
++            shuf_by_depth[depth] = te_shuf[best_lam]
++        middle = test_by_depth[0.5]
++        edge = 0.5 * (test_by_depth[0.1] + test_by_depth[0.9])
++        selectivity = {f"{d:.1f}": test_by_depth[d] - shuf_by_depth[d]
++                       for d in DEPTHS}
++        return {
++            "probe_acc_by_depth": {f"{d:.1f}": v for d, v in test_by_depth.items()},
++            "probe_selection": {f"{d:.1f}": v for d, v in sel_by_depth.items()},
++            "probe_shuffled_by_depth": {f"{d:.1f}": v for d, v in shuf_by_depth.items()},
++            "probe_selectivity": selectivity,
++            "probe_acc_middle": middle,
++            "probe_acc_edge": edge,
++            "probe_litm_gap": edge - middle,   # 0 = flat linear access
++            "chance": 1.0 / N_CLASSES,
++            "grid": grid,
++            "n_per_class": n_per_class,
++            "seed": seed,
++        }
++    finally:
++        model.train(was_training)
++
++
++def main() -> None:
++    ap = argparse.ArgumentParser(
++        description="Linear probe: is mid-context info linearly accessible?")
++    ap.add_argument("--checkpoint", required=True)
++    ap.add_argument("--config", required=True)
++    ap.add_argument("--out", required=True)
++    ap.add_argument("--n-per-class", type=int, default=24)
++    ap.add_argument("--seed", type=int, default=42)
++    args = ap.parse_args()
++
++    cfg = json.load(open(args.config, encoding="utf-8"))["model"]
++    model = GPT(GPTConfig(**cfg)).eval()
++    try:
++        payload = torch.load(args.checkpoint, map_location="cpu", weights_only=True)
++    except Exception:
++        payload = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
++    state = payload.get("model", payload) if isinstance(payload, dict) else payload
++    state = {k: (v.float() if torch.is_tensor(v) and torch.is_floating_point(v) else v)
++             for k, v in state.items()}
++    model.load_state_dict(state, strict=True)
++
++    res = run_probe(model, n_per_class=args.n_per_class, seed=args.seed)
++    res["meta"] = {"checkpoint": args.checkpoint, "config": args.config}
++    os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
++    json.dump(res, open(args.out, "w", encoding="utf-8"), indent=2)
++    print(f"probe_acc middle={res.get('probe_acc_middle'):.3f} "
++          f"edge={res.get('probe_acc_edge'):.3f} "
++          f"litm_gap={res.get('probe_litm_gap'):+.3f} "
++          f"(chance={res.get('chance'):.3f})")
++    sel = res.get("probe_selectivity") or {}
++    if sel:
++        worst = min(sel.values())
++        print(f"selectivity (real - shuffled), worst depth: {worst:+.3f} "
++              f"{'OK' if worst > 0.1 else 'WARNING: probe may memorize'}")
++    print(f"wrote {args.out}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/src/make_init.py b/src/make_init.py
+index e18326e..3dbca1d 100644
+--- a/src/make_init.py
++++ b/src/make_init.py
+@@ -352,6 +352,18 @@ def save_shared_backbone_init(
+     dtype: Optional[torch.dtype],
+     allow_shape_mismatch: bool = False,
+ ) -> None:
++    # Sterility gate (init-audit finding): the trainer reads data-order seed
++    # from EACH run's own config. If base and HLA seeds differ, the twins see
++    # different token order - silently NOT token-matched, even though the
++    # shared backbone itself would still verify. validate_configs.py catches
++    # this too, but make_init is callable directly (Kaggle cells do) -
++    # defence in depth: fail here as well.
++    if int(base_config["seed"]) != int(hla_config["seed"]):
++        raise SystemExit(
++            f"STERILITY VIOLATION: base seed={base_config['seed']} != "
++            f"hla seed={hla_config['seed']}. Twins must share the seed, or "
++            "their data order diverges and the pair is not token-matched."
++        )
+     # Use base seed for base. HLA seed is irrelevant for copied backbone but used
+     # for any non-copied non-HLA tensors if shapes differ.
+     base = model_from_config(base_config, seed=int(base_config["seed"]))
+diff --git a/src/train_xla.py b/src/train_xla.py
+index c2c66c4..cff5197 100644
+--- a/src/train_xla.py
++++ b/src/train_xla.py
+@@ -1768,10 +1768,17 @@ def _train_worker_fn(index: int, config: Dict[str, Any]) -> None:
+         master_print("[ERROR] Training crashed. Attempting best-effort crash save...")
+         if master:
+             traceback.print_exc()
++        if rank != 0:
++            raise  # finding #11: non-masters skip crash save (8x2.4GB killed V5 disk)
+         try:
+-            # Each worker writes its own rank-specific crash file.
+-            # No rendezvous (could hang if some workers died).
+-            # No single-master dependency (master may have died).
++            # Finding #11 (V5 disk blow-up): ALL 8 ranks used to write a full
++            # fp32 model+Adam payload (~2.4 GB each at 200m -> 19 GB per
++            # crash), which killed the session's disk before anything could
++            # be salvaged. The twins are data-parallel: after the last
++            # completed optimizer step every rank holds IDENTICAL state, so
++            # one crash file carries all information. Rank 0 writes the full
++            # resume payload; other ranks write nothing (if rank 0 died
++            # before the save, the resume_every checkpoint is the fallback).
+             crash_path = os.path.join(
+                 save_dir, f"crash_rank{rank}_{run_name}_step{completed_step}_resume.pt"
+             )
+diff --git a/tests/test_eval.py b/tests/test_eval.py
+index dcda272..0664f9b 100644
+--- a/tests/test_eval.py
++++ b/tests/test_eval.py
+@@ -786,6 +786,45 @@ class TestCausalPatch:
+         assert out["induction_std"] >= 0.0
+ 
+ 
++    def test_reverse_franken_boundaries(self):
++        """A-extension (necessity test): reverse franken = HLA body + base
++        retrieval. The V-side gate must stay HLA (body), the phase must
++        become base - the exact mirror of the forward boundaries."""
++        cp, bs, hs = self._pair()
++        fr = cp.build_franken(bs, hs, 32, "retrieval", donor="base")
++        kq = next(k for k in hs if "W_phase_q" in k)
++        kv = next(k for k in hs if "W_gate_v.weight" in k)
++        km = next(k for k in hs if "mlp" in k and "weight" in k)
++        assert torch.equal(fr[kq], bs[kq]), "phase must come from base (graft)"
++        assert torch.equal(fr[kv], hs[kv]), "V-gate must stay HLA (body)"
++        assert torch.equal(fr[km], hs[km]), "MLP must stay HLA (body)"
++        # Q,K rows from base, V rows from HLA
++        key = next(k for k in hs if "c_attn.weight" in k)
++        assert torch.equal(fr[key][:64], bs[key][:64])
++        assert torch.equal(fr[key][64:], hs[key][64:])
++
++    def test_franken_unknown_donor_rejected(self):
++        import pytest as _pytest
++        cp, bs, hs = self._pair()
++        with _pytest.raises(ValueError, match="unknown donor"):
++            cp.build_franken(bs, hs, 32, "retrieval", donor="qwen")
++
++    def test_snr_is_gap_metric(self):
++        """B-extension: the activation-level SNR must be part of the
++        pre-registered gap metrics - P(B) probes alone can be moved by the
++        V-path; snr_needle only moves with score geometry."""
++        cp, _, _ = self._pair()
++        assert "snr_needle_last" in cp.GAP_METRICS
++
++    def test_forward_reverse_full_are_mirror_images(self):
++        """Sanity: transplant='full' with donor='hla' == HLA exactly, and
++        with donor='base' == base exactly."""
++        cp, bs, hs = self._pair()
++        f_h = cp.build_franken(bs, hs, 32, "full", donor="hla")
++        f_b = cp.build_franken(bs, hs, 32, "full", donor="base")
++        assert all(torch.equal(f_h[k], hs[k]) for k in hs)
++        assert all(torch.equal(f_b[k], bs[k]) for k in bs)
++
+ class TestAttentionNeedleSNR:
+     """Diff-Transformer-lesson metric (their Table 3 'attention noise'):
+     activation-level SNR of retrieval. The Oral-tier reading of our
+@@ -856,3 +895,101 @@ class TestAttentionNeedleSNR:
+         assert boosted > 100 * max(base, 1e-9), (
+             f"metric must saturate when attention IS on the needle "
+             f"(base={base:.3f}, boosted={boosted:.3f})")
++
++
++
++class TestTrainProbe:
++    """scripts/train_probe.py: position-conditioned linear probing (H4-P).
++    The mech-interp reviewer's question 'is mid-context info actually more
++    LINEARLY ACCESSIBLE, or just more attended-to?' needs its own tool -
++    P(B) and SNR both live downstream of attention; the ridge probe reads
++    the residual stream directly."""
++
++    def _load(self):
++        import importlib.util as ilu
++        spec = ilu.spec_from_file_location(
++            "train_probe", os.path.join(ROOT, "scripts", "train_probe.py"))
++        mod = ilu.module_from_spec(spec)
++        spec.loader.exec_module(mod)
++        return mod
++
++    def _model(self, **kw):
++        base = dict(block_size=128, vocab_size=50257, n_layer=2, n_head=2,
++                    n_embd=64, gradient_checkpointing=False)
++        base.update(kw)
++        torch.manual_seed(0)
++        return GPT(GPTConfig(**base)).eval()
++
++    def test_chance_at_random_init(self):
++        """Calibration: random weights carry no needle info; every depth
++        must decode near chance (1/8), i.e. the probe must not hallucinate
++        signal out of the ridge fit itself."""
++        tp = self._load()
++        res = tp.run_probe(self._model(), n_per_class=12)
++        for d, a in res["probe_acc_by_depth"].items():
++            assert a < 0.45, f"depth {d}: {a} >> chance 0.125"
++        # Selectivity control: no real signal -> real ~ shuffled (both chance)
++        assert all(v < 0.4 for v in res["probe_selectivity"].values())
++
++    def test_detects_planted_signal(self):
++        """Ground truth: if a label-dependent direction IS in the residual
++        stream, the probe must find it (sensitivity)."""
++        tp = self._load()
++        m = self._model()
++        sig = torch.randn(8, 64) * 5.0
++        holder = [None]
++        orig = m.forward
++
++        def wrapped(idx, targets=None):
++            holder[0] = idx
++            return orig(idx, targets)
++
++        m.forward = wrapped
++
++        def hook(_mod, _inp, out):
++            h = out[0] if isinstance(out, tuple) else out
++            toks = holder[0]
++            T = toks.shape[1]
++            mask = (toks >= 46000) & (toks < 46008)
++            for b in range(toks.shape[0]):
++                idx = mask[b].nonzero()
++                if len(idx):
++                    h[b, T - 2, :] += sig[int(toks[b, idx[0]] - 46000)]
++            return (h,) + out[1:] if isinstance(out, tuple) else h
++
++        hd = m.transformer.h[-1].register_forward_hook(hook)
++        res = tp.run_probe(m, n_per_class=12)
++        hd.remove()
++        assert all(a > 0.8 for a in res["probe_acc_by_depth"].values())
++        # Real signal -> high selectivity (probe reads features, not memorizes)
++        assert all(v > 0.5 for v in res["probe_selectivity"].values())
++
++    def test_selection_on_val_not_test(self):
++        """The selection-bias fix: layer and lambda must be chosen on VAL;
++        the reported scalar is TEST accuracy of that choice. Structural
++        check: run_probe reports the selection metadata, and the selected
++        (layer, lambda) is derived from val_acc - never from test."""
++        tp = self._load()
++        res = tp.run_probe(self._model(), n_per_class=12)
++        sel = res["probe_selection"]
++        assert set(sel) == {"0.1", "0.3", "0.5", "0.7", "0.9"}
++        for d, rec in sel.items():
++            assert 0 <= rec["layer"] < 2
++            assert rec["lambda"] in tp.LAMBDA_GRID
++            assert 0.0 <= rec["val_acc"] <= 1.0
++        src = open(os.path.join(ROOT, "scripts", "train_probe.py")).read()
++        assert "va[j] > best_val" in src, "layer choice must compare VAL accs"
++
++    def test_nan_policy_tiny_vocab(self):
++        import math
++        tp = self._load()
++        m = self._model(vocab_size=1024)
++        res = tp.run_probe(m)
++        assert math.isnan(res["probe_litm_gap"])
++
++    def test_restores_training_mode(self):
++        tp = self._load()
++        m = self._model()
++        m.train()
++        tp.run_probe(m, n_per_class=8)
++        assert m.training
+diff --git a/tests/test_make_init.py b/tests/test_make_init.py
+index f88e76c..2aeaa4a 100644
+--- a/tests/test_make_init.py
++++ b/tests/test_make_init.py
+@@ -112,3 +112,160 @@ class TestStableHash:
+     def test_deterministic_and_order_independent(self):
+         assert stable_hash({"a": 1, "b": 2}) == stable_hash({"b": 2, "a": 1})
+         assert stable_hash({"a": 1}) != stable_hash({"a": 2})
++
++
++class TestInitAudit:
++    """Line-by-line audit round of make_init.py: determinism, seed
++    plumbing, and the seed-mismatch sterility gate."""
++
++    def _small(self, tmp_path, seed_base=42, seed_hla=42):
++        import json
++        cfgs = []
++        for var, seed in (("base", seed_base), ("hla", seed_hla)):
++            src = json.load(open(os.path.join(
++                ROOT, "configs", f"kaggle_smoke_{var}_s42.json")))
++            src["model"].update(n_layer=1, n_head=2, n_embd=64, block_size=128)
++            src["seed"] = seed
++            p = tmp_path / f"{var}_{seed}.json"
++            p.write_text(json.dumps(src))
++            cfgs.append(str(p))
++        return cfgs
++
++    def test_shared_backbone_bit_deterministic(self, tmp_path):
++        """Two runs of the same pair must produce bit-identical states -
++        the whole experiment chain assumes init checkpoints are pure
++        functions of (config, seed)."""
++        import subprocess, sys as _sys, hashlib, torch as _t
++        bc, hc = self._small(tmp_path)
++
++        def run(tag):
++            ob, oh = str(tmp_path / f"{tag}b.pt"), str(tmp_path / f"{tag}h.pt")
++            r = subprocess.run([_sys.executable,
++                                os.path.join(ROOT, "src", "make_init.py"),
++                                "--shared-backbone", "--base-config", bc,
++                                "--hla-config", hc, "--out-base", ob,
++                                "--out-hla", oh], capture_output=True, text=True)
++            assert r.returncode == 0, r.stderr[-400:]
++            return ob
++
++        def h(path):
++            sd = _t.load(path, map_location="cpu", weights_only=False)["model"]
++            m = hashlib.sha256()
++            for k in sorted(sd):
++                m.update(k.encode())
++                m.update(sd[k].numpy().tobytes())
++            return m.hexdigest()
++
++        assert h(run("a")) == h(run("b"))
++
++    def test_seed_mismatch_rejected(self, tmp_path):
++        """Sterility gate: differing base/hla seeds diverge the twins' data
++        order (trainer reads seed from each config) - must fail loudly."""
++        import subprocess, sys as _sys
++        bc, hc = self._small(tmp_path, seed_base=42, seed_hla=77)
++        r = subprocess.run([_sys.executable,
++                            os.path.join(ROOT, "src", "make_init.py"),
++                            "--shared-backbone", "--base-config", bc,
++                            "--hla-config", hc,
++                            "--out-base", str(tmp_path / "b.pt"),
++                            "--out-hla", str(tmp_path / "h.pt")],
++                           capture_output=True, text=True)
++        assert r.returncode != 0
++        assert "STERILITY VIOLATION" in (r.stdout + r.stderr)
++
++    def test_hla_seed_does_not_leak_into_backbone(self, tmp_path):
++        """The shared backbone must be a function of the BASE seed only:
++        creating models in any order / with polluted global RNG must not
++        change the copied tensors (verified via model_from_config's full
++        reseed)."""
++        import json, torch as _t
++        from src.make_init import model_from_config
++        bc, hc = self._small(tmp_path)
++        cfg = json.load(open(hc))
++        m1 = model_from_config(cfg)
++        _t.manual_seed(12345)
++        _t.randn(4096)  # pollute global RNG
++        m2 = model_from_config(cfg)
++        sd1, sd2 = m1.state_dict(), m2.state_dict()
++        assert all(_t.equal(sd1[k], sd2[k]) for k in sd1)
++
++    def test_identity_survives_bf16_cast(self, tmp_path):
++        """--dtype bf16 must not perturb the exact-zero identity params
++        (0.0 is exactly representable, but a regression that added noise
++        before the cast would slip through unnoticed otherwise)."""
++        import subprocess, sys as _sys, torch as _t
++        bc, hc = self._small(tmp_path)
++        out = str(tmp_path / "s.pt")
++        r = subprocess.run([_sys.executable,
++                            os.path.join(ROOT, "src", "make_init.py"),
++                            "--config", hc, "--out", out, "--dtype", "bf16"],
++                           capture_output=True, text=True)
++        assert r.returncode == 0, r.stderr[-400:]
++        sd = _t.load(out, map_location="cpu", weights_only=False)["model"]
++        for k, v in sd.items():
++            if "W_phase_q" in k or "W_gate_k.weight" in k or "W_qtemp" in k:
++                assert float(v.float().abs().max()) == 0.0, k
++
++    def test_allow_shape_mismatch_leaves_audit_trail(self, tmp_path):
++        """The escape hatch must not be silent: manifest.shape_mismatches
++        must record every non-copied tensor, or a non-sterile pair could
++        masquerade as sterile."""
++        import json, subprocess, sys as _sys
++        bc, hc = self._small(tmp_path)
++        ch = json.loads(open(hc).read())
++        ch["model"]["vocab_size"] = 50304
++        ch["expected_vocab_size"] = 50304
++        hc2 = tmp_path / "hla_v2.json"
++        hc2.write_text(json.dumps(ch))
++        args = [_sys.executable, os.path.join(ROOT, "src", "make_init.py"),
++                "--shared-backbone", "--base-config", bc,
++                "--hla-config", str(hc2),
++                "--out-base", str(tmp_path / "b.pt"),
++                "--out-hla", str(tmp_path / "h.pt")]
++        r = subprocess.run(args, capture_output=True, text=True)
++        assert r.returncode != 0, "shape mismatch without flag must fail"
++        r = subprocess.run(args + ["--allow-shape-mismatch"],
++                           capture_output=True, text=True)
++        assert r.returncode == 0, r.stderr[-300:]
++        man = json.loads(open(str(tmp_path / "h.pt.manifest.json")).read())
++        assert man["shape_mismatches"], "audit trail lost"
++
++    def test_pair_manifests_identical(self, tmp_path):
++        """base and hla manifest files must be the same document - one
++        audit record for one pair."""
++        import json, subprocess, sys as _sys
++        bc, hc = self._small(tmp_path)
++        r = subprocess.run([_sys.executable,
++                            os.path.join(ROOT, "src", "make_init.py"),
++                            "--shared-backbone", "--base-config", bc,
++                            "--hla-config", hc,
++                            "--out-base", str(tmp_path / "b.pt"),
++                            "--out-hla", str(tmp_path / "h.pt")],
++                           capture_output=True, text=True)
++        assert r.returncode == 0
++        m1 = json.loads(open(str(tmp_path / "b.pt.manifest.json")).read())
++        m2 = json.loads(open(str(tmp_path / "h.pt.manifest.json")).read())
++        assert m1 == m2
++
++    def test_payload_passes_trainer_gate(self, tmp_path):
++        """End-to-end contract: the payload make_init writes must pass the
++        trainer's validate_init_config_compatibility for its own config and
++        fail for a shape-modified one (correct argument order: current
++        run config first, saved init config second)."""
++        import json, subprocess, sys as _sys, copy, torch as _t
++        bc, hc = self._small(tmp_path)
++        out = str(tmp_path / "h.pt")
++        r = subprocess.run([_sys.executable,
++                            os.path.join(ROOT, "src", "make_init.py"),
++                            "--config", hc, "--out", out],
++                           capture_output=True, text=True)
++        assert r.returncode == 0, r.stderr[-300:]
++        from src.train_xla import validate_init_config_compatibility
++        payload = _t.load(out, map_location="cpu", weights_only=False)
++        cfg = json.loads(open(hc).read())
++        validate_init_config_compatibility(cfg, payload["config"])  # no raise
++        bad = copy.deepcopy(cfg)
++        bad["model"]["n_embd"] = 256
++        import pytest as _pytest
++        with _pytest.raises(ValueError):
++            validate_init_config_compatibility(bad, payload["config"])
+diff --git a/tests/test_train_utils.py b/tests/test_train_utils.py
+index fab7c7d..19f406f 100644
+--- a/tests/test_train_utils.py
++++ b/tests/test_train_utils.py
+@@ -565,3 +565,16 @@ class TestHbmBudget:
+             assert int(c["resume_every"]) <= 500, "need resume for session-splits"
+             found += 1
+         assert found == 2, "expected the base+hla 9h pair"
++
++    def test_crash_save_master_only(self):
++        """Finding #11 (V5): all 8 ranks wrote full fp32 model+Adam crash
++        payloads (~2.4 GB each at 200m = 19 GB per crash) - the session
++        disk died before anything could be salvaged (output 0 B). Ranks
++        are data-parallel twins after the last completed step, so one
++        file carries all information: only rank 0 may write."""
++        src = open(os.path.join(ROOT, "src", "train_xla.py")).read()
++        i = src.find("Training crashed")
++        assert i > 0
++        window = src[i:i + 600]
++        assert "if rank != 0:" in window and "raise" in window, (
++            "non-master ranks must re-raise BEFORE the crash-save block")
